@@ -73,27 +73,43 @@ Common flags:
 	root.AddCommand(lnkcmd.NewJobCmd(&flagNoInput, &flagJSON, &flagPlain, &flagQuiet, &flagVerbose, &flagDebug, &flagNoColor))
 	root.AddCommand(lnkcmd.NewApplyCmd(&flagNoInput, &flagJSON, &flagPlain, &flagQuiet, &flagVerbose, &flagDebug, &flagNoColor))
 	root.AddCommand(lnkcmd.NewSavedCmd(&flagNoInput, &flagJSON, &flagPlain, &flagQuiet, &flagVerbose, &flagDebug, &flagNoColor))
+	root.AddCommand(lnkcmd.NewProfileCmd())
+	root.AddCommand(lnkcmd.NewAlertsCmd())
+	root.AddCommand(lnkcmd.NewStatusCmd())
 
-	// Stub subcommands — implemented by stream 4.
-	stubs := []struct {
-		use   string
-		short string
-	}{
-		{"profile", "View a LinkedIn profile"},
-		{"alerts", "Manage job alerts"},
-		{"status", "Show API and auth status"},
-	}
-	for _, s := range stubs {
-		s := s
-		root.AddCommand(&cobra.Command{
-			Use:   s.use,
-			Short: s.short,
-			RunE: func(cmd *cobra.Command, args []string) error {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s: not yet implemented\n", s.use)
-				return nil
-			},
-		})
-	}
+	// Shell completion.
+	root.AddCommand(&cobra.Command{
+		Use:   "completion [bash|zsh|fish|powershell]",
+		Short: "Generate shell completion scripts",
+		Long: `Generate shell completion scripts for lnk.
+
+To load completions:
+
+Bash:
+  $ source <(lnk completion bash)
+
+Zsh:
+  $ source <(lnk completion zsh)
+
+Fish:
+  $ lnk completion fish | source`,
+		ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
+		Args:                  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
+		DisableFlagsInUseLine: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch args[0] {
+			case "bash":
+				return root.GenBashCompletion(os.Stdout)
+			case "zsh":
+				return root.GenZshCompletion(os.Stdout)
+			case "fish":
+				return root.GenFishCompletion(os.Stdout, true)
+			case "powershell":
+				return root.GenPowerShellCompletionWithDesc(os.Stdout)
+			}
+			return nil
+		},
+	})
 
 	_ = flagJSON
 	_ = flagPlain
