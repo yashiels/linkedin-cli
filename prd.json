@@ -1,0 +1,368 @@
+{
+  "product": {
+    "name": "lnk",
+    "tagline": "LinkedIn CLI — search jobs, view postings, apply, and manage your LinkedIn from the terminal.",
+    "version": "0.1.0",
+    "language": "Go",
+    "license": "MIT",
+    "repo": "https://github.com/yashiels/linkedin-cli",
+    "issue": "https://github.com/yashiels/linkedin-cli/issues/1"
+  },
+
+  "background": {
+    "problem": "LinkedIn has no public API for job seekers. The platform is walled behind a browser UI with no CLI, scriptability, or automation support. Power users, developers, and job seekers who want to search/filter/apply at scale are locked into the slow web/mobile experience.",
+    "approach": "Reverse-engineer LinkedIn's private Voyager GraphQL API from the Android APK (v4.1.1209, decompiled via jadx) and captured mitmproxy traffic. Build a Go CLI that speaks this API directly using session cookies for auth.",
+    "data_sources": [
+      "Decompiled LinkedIn Android APK — 481 GraphQL query IDs with hashes across 261 API resources",
+      "Live mitmproxy captures — full request/response format, headers, auth tokens, pagination, RestLi variable encoding",
+      "CareersGraphQLClient.java — master query registry from decompiled source"
+    ],
+    "key_discovery": "LinkedIn uses a custom RestLi encoding for GraphQL variables, NOT standard JSON. Format: (key:value,list:List(a,b)). This was only visible through traffic capture, not the decompiled code alone."
+  },
+
+  "architecture": {
+    "structure": {
+      "cmd/lnk/main.go": "Cobra root command, global flags, subcommand wiring",
+      "internal/restli/": "RestLi variable encoder (LinkedIn's custom query format)",
+      "internal/api/": "HTTP client, auth header injection, rate limiting, GraphQL query methods",
+      "internal/auth/": "Credential store (~/.config/lnk/credentials.json), env var override",
+      "internal/config/": "TOML config loader with precedence (flags > env > config > defaults)",
+      "internal/output/": "Table/JSON/plain formatters, TTY detection, NO_COLOR support",
+      "internal/types/": "URN parser, shared response types, exit codes",
+      "internal/cmd/": "Cobra command implementations (auth, search, job, apply, saved, feed, profile, alerts, status)"
+    },
+    "dependencies": [
+      "github.com/spf13/cobra — CLI framework",
+      "github.com/fatih/color — terminal colors",
+      "github.com/BurntSushi/toml — config parsing",
+      "golang.org/x/term — password input (echo disabled)"
+    ]
+  },
+
+  "api": {
+    "base_url": "https://www.linkedin.com/voyager/api/graphql",
+    "auth_method": "Session cookies (li_at + JSESSIONID/CSRF)",
+    "transport": {
+      "headers": {
+        "cookie": "li_at=<session>; JSESSIONID=ajax:<csrf>; bcookie=<browser>; liap=true; lang=v=2&lang=en_US",
+        "csrf-token": "ajax:<csrf_value>",
+        "x-restli-protocol-version": "2.0.0",
+        "x-li-lang": "en_US",
+        "x-li-track": "{device fingerprint JSON}",
+        "user-agent": "com.linkedin.android/211700 (Linux; U; Android 16; ...)"
+      },
+      "encoding": "RestLi (not JSON) — (key:value,list:List(a,b))",
+      "rate_limiting": "Exponential backoff on HTTP 429"
+    },
+    "core_queries": {
+      "job_search": {
+        "queryName": "JobCardsByJobSearch",
+        "queryId": "voyagerJobsDashJobCards.c7c69fb8e8f054fed088918d714be58a",
+        "description": "Search jobs by keyword, location, filters. Paginated (count/start)."
+      },
+      "job_detail": {
+        "queryName": "JobPostingDetailSectionsByCardSectionTypesV2",
+        "queryId": "voyagerJobsDashJobPostingDetailSections.8195171dc4c610f8c1551eaef6546bd8",
+        "description": "Full job posting with description, requirements, company info."
+      },
+      "easy_apply_check": {
+        "queryName": "JobsOnsiteApplyApplicationByJobPosting",
+        "queryId": "voyagerJobsDashOnsiteApplyApplication.34ac512c4fd87baec02c710aef4f563b",
+        "description": "Check if job supports Easy Apply and get form data."
+      },
+      "submit_application": {
+        "method": "POST",
+        "path": "/voyager/api/voyagerJobsDashOnsiteApplyApplication?action=submitApplication",
+        "description": "Submit Easy Apply application."
+      },
+      "job_feed": {
+        "queryName": "JobCardsByJobSearchDeepLink",
+        "queryId": "voyagerJobsDashJobCards.d94f151c1c2d32ad5dbdedced6e4bba7",
+        "description": "Recommended jobs feed."
+      },
+      "search_filters": {
+        "queryName": "JobSearchFiltersByJobSeachQuery",
+        "queryId": "voyagerJobsDashSearchFilterClustersResource.47b05823e4f9f731229151a0c3b4aa87",
+        "description": "Available filter facets with counts."
+      },
+      "job_alerts": {
+        "queryName": "JobAlertCreateEligibilitiesByTitlesAndLocations",
+        "queryId": "voyagerJobsDashJobAlertCreateEligibilities.03fbb3a1c7a7d6a0c18f98da481a6d78",
+        "description": "Job alert management."
+      },
+      "saved_jobs": {
+        "queryName": "JobCardsByJobCollections",
+        "queryId": "voyagerJobsDashJobCards.c7062defea421b65446793bbc6b1cca5",
+        "description": "Saved/bookmarked jobs."
+      },
+      "search_history": {
+        "queryName": "JobSearchHistory",
+        "queryId": "voyagerJobsDashJobSearchHistories.edd9404d3f033ff73ee74422cd235853",
+        "description": "Past search queries."
+      },
+      "job_preferences": {
+        "queryName": "JobSeekerPreferences",
+        "queryId": "voyagerJobsDashJobSeekerPreferences.14b5c900a1836058a9f9a36e2cc9dd8a",
+        "description": "User job seeker preferences."
+      }
+    },
+    "filter_values": {
+      "experience": {
+        "1": "Internship",
+        "2": "Entry level",
+        "3": "Associate",
+        "4": "Mid-Senior level",
+        "5": "Director",
+        "6": "Executive"
+      },
+      "job_type": {
+        "F": "Full-time",
+        "P": "Part-time",
+        "C": "Contract",
+        "T": "Temporary",
+        "I": "Internship",
+        "V": "Volunteer",
+        "O": "Other"
+      },
+      "sort": {
+        "R": "Most recent",
+        "DD": "Most relevant"
+      },
+      "geo_ids": {
+        "104035573": "South Africa",
+        "105013608": "Cape Town",
+        "104273735": "Johannesburg",
+        "105944906": "Pretoria",
+        "106463985": "Durban"
+      }
+    },
+    "total_discovered_queries": 481,
+    "total_api_resources": 261
+  },
+
+  "commands": {
+    "auth": {
+      "subcommands": {
+        "login": "Import li_at session cookie (interactive prompt with echo disabled)",
+        "status": "Show current auth state and account info",
+        "logout": "Clear stored credentials"
+      },
+      "storage": "~/.config/lnk/credentials.json (0600 perms)",
+      "env_override": "LNK_LI_AT"
+    },
+    "search": {
+      "usage": "lnk search <keywords>",
+      "flags": {
+        "--location, -l": "Location name or geo URN",
+        "--type, -t": "Job type filter (full-time, part-time, contract, temporary, internship, volunteer)",
+        "--experience, -e": "Experience level (internship, entry, associate, mid-senior, director, executive)",
+        "--easy-apply": "Easy Apply jobs only",
+        "--remote": "Remote jobs only",
+        "--sort": "Sort order: recent or relevant (default: relevant)",
+        "--limit, -n": "Max results (default: 25)",
+        "--posted": "Time posted: 24h, week, month"
+      },
+      "output": "Table: ID | Title | Company | Location | Posted | Apply type"
+    },
+    "job": {
+      "usage": "lnk job <job-id>",
+      "flags": {
+        "--json": "Full structured JSON",
+        "--open": "Open in browser"
+      },
+      "output": "Title, company, location, description, requirements, salary, applicant count"
+    },
+    "apply": {
+      "usage": "lnk apply <job-id>",
+      "flags": {
+        "--dry-run": "Preview without submitting",
+        "--confirm": "Skip confirmation prompt"
+      },
+      "safety": "Interactive confirmation by default. --no-input fails if confirmation needed."
+    },
+    "saved": {
+      "subcommands": {
+        "list": "List saved jobs",
+        "add <job-id>": "Save a job",
+        "remove <job-id>": "Unsave a job"
+      }
+    },
+    "feed": {
+      "usage": "lnk feed",
+      "description": "Browse recommended job feed",
+      "flags": { "--limit, -n": "Max results" }
+    },
+    "profile": {
+      "usage": "lnk profile [username]",
+      "description": "View own or another user's profile"
+    },
+    "alerts": {
+      "subcommands": {
+        "list": "List job alerts",
+        "create": "Create alert (--keywords, --location)",
+        "delete <id>": "Delete alert"
+      }
+    },
+    "status": {
+      "usage": "lnk status",
+      "description": "Auth state, connectivity check, config info"
+    }
+  },
+
+  "cli_conventions": {
+    "source": "steipete/clig.dev guidelines",
+    "global_flags": [
+      "-h, --help",
+      "--version",
+      "-q, --quiet",
+      "-v, --verbose",
+      "-d, --debug",
+      "--json",
+      "--plain",
+      "--no-color",
+      "--no-input",
+      "--config <path>"
+    ],
+    "exit_codes": {
+      "0": "Success",
+      "1": "Generic error",
+      "2": "Invalid usage / parse error",
+      "3": "Auth error (not logged in, expired session)",
+      "4": "Rate limited",
+      "5": "Network error"
+    },
+    "io_contract": {
+      "stdout": "Primary data (search results, job details)",
+      "stderr": "Progress, diagnostics, errors",
+      "tty_detection": "Fancy formatting when interactive, plain when piped"
+    },
+    "config": {
+      "file": "~/.config/lnk/config.toml",
+      "env_override": "LNK_CONFIG",
+      "precedence": "flags > env > config file > defaults"
+    },
+    "env_vars": [
+      "LNK_LI_AT — session token override",
+      "LNK_CONFIG — config file path",
+      "LNK_DEBUG — enable debug output",
+      "NO_COLOR — disable colors"
+    ]
+  },
+
+  "build_plan": {
+    "streams": [
+      {
+        "id": 1,
+        "name": "Foundation",
+        "agent": "lnk-foundation",
+        "branch": "agent/build-cli",
+        "worktree": ".worktrees/build-cli",
+        "status": "running",
+        "deliverables": [
+          "go.mod + dependencies",
+          "RestLi encoder with tests",
+          "API client (HTTP, auth headers, rate limiting)",
+          "Auth store (credential management)",
+          "Config loader (TOML + env precedence)",
+          "Output formatters (table/JSON/plain, TTY detection)",
+          "Shared types (URN parser, job structs, exit codes)",
+          "Cobra root command with global flags",
+          "Auth command (login/status/logout)",
+          "Stub subcommands for all other commands"
+        ],
+        "depends_on": []
+      },
+      {
+        "id": 2,
+        "name": "Search + Feed",
+        "agent": "lnk-search-feed",
+        "branch": "agent/search-feed",
+        "worktree": ".worktrees/search-feed",
+        "status": "running (waiting for foundation)",
+        "deliverables": [
+          "Job search GraphQL call (JobCardsByJobSearch)",
+          "Search filters API (JobSearchFiltersByJobSeachQuery)",
+          "Search command with all flags",
+          "Feed command (JobCardsByJobSearchDeepLink)",
+          "Voyager response parser (nested JSON + URN resolution)",
+          "Location resolution (geo URN lookup)",
+          "Pagination across API pages"
+        ],
+        "depends_on": [1]
+      },
+      {
+        "id": 3,
+        "name": "Job + Apply + Saved",
+        "agent": "lnk-job-apply",
+        "branch": "agent/job-apply",
+        "worktree": ".worktrees/job-apply",
+        "status": "running (waiting for foundation)",
+        "deliverables": [
+          "Job detail API (JobPostingDetailSectionsByCardSectionTypesV2)",
+          "Easy Apply check + submit APIs",
+          "Job command with --open browser launch",
+          "Apply command with --dry-run and --confirm",
+          "Saved jobs command (list/add/remove)",
+          "HTML to text converter for job descriptions"
+        ],
+        "depends_on": [1]
+      },
+      {
+        "id": 4,
+        "name": "Profile + Extras",
+        "agent": "lnk-profile-extras",
+        "branch": "agent/profile-extras",
+        "worktree": ".worktrees/profile-extras",
+        "status": "running (waiting for foundation)",
+        "deliverables": [
+          "Profile command (own + other users)",
+          "Alerts command (list/create/delete)",
+          "Status command (auth + connectivity check)",
+          "Comprehensive README",
+          "Shell completion (bash/zsh/fish)",
+          "Makefile"
+        ],
+        "depends_on": [1]
+      }
+    ],
+    "merge_plan": {
+      "step_1": "Foundation (agent/build-cli) merges into main",
+      "step_2": "Rebase agent/search-feed onto main, resolve conflicts in internal/cmd/ stubs",
+      "step_3": "Rebase agent/job-apply onto main, resolve conflicts in internal/cmd/ stubs",
+      "step_4": "Rebase agent/profile-extras onto main, resolve conflicts in internal/cmd/ stubs",
+      "step_5": "Final integration: go build, go test, manual smoke test",
+      "step_6": "Push to main, create GitHub release"
+    },
+    "testing": {
+      "unit": "go test ./... on each stream",
+      "integration": "Smoke test with real li_at token after merge",
+      "smoke_commands": [
+        "lnk --help",
+        "lnk auth login",
+        "lnk search 'software engineer' --location 'Cape Town' --json",
+        "lnk job <id>",
+        "lnk feed --limit 5",
+        "lnk status"
+      ]
+    }
+  },
+
+  "risks": [
+    "LinkedIn may change query hashes in app updates — queries are version-pinned to APK v4.1.1209",
+    "Session tokens (li_at) expire — no way to programmatically refresh without re-login",
+    "Aggressive rate limiting may block CLI usage patterns",
+    "LinkedIn may detect non-browser user-agents and block/ban accounts",
+    "RestLi encoding edge cases may cause query failures on untested parameter combinations",
+    "Easy Apply submission format may vary per job posting (different form fields)"
+  ],
+
+  "future": [
+    "Messaging support (voyagerMessagingDash APIs)",
+    "Connection management (voyagerRelationshipsDash APIs)",
+    "Company/organization lookup (voyagerOrganizationDash APIs)",
+    "Feed browsing (voyagerFeedDash APIs)",
+    "Query hash auto-update from newer APK versions",
+    "Browser cookie extraction (auto-import from Chrome/Firefox)",
+    "TUI mode with interactive job browsing"
+  ]
+}

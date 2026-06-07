@@ -16,7 +16,9 @@ import (
 var version = "dev"
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	root := newRootCmd()
+	if err := root.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -68,17 +70,17 @@ Common flags:
 
 	// Wire subcommands.
 	root.AddCommand(lnkcmd.NewAuthCmd(&flagNoInput))
+	root.AddCommand(lnkcmd.NewSearchCmd(&flagJSON, &flagPlain, &flagNoColor, &flagQuiet, &flagVerbose, &flagDebug))
+	root.AddCommand(lnkcmd.NewFeedCmd(&flagJSON, &flagPlain, &flagNoColor, &flagQuiet, &flagVerbose, &flagDebug))
 
 	// Stub subcommands — implemented by other streams.
 	stubs := []struct {
 		use   string
 		short string
 	}{
-		{"search", "Search for jobs"},
 		{"job", "View job details"},
 		{"apply", "Apply to a job"},
 		{"saved", "Manage saved jobs"},
-		{"feed", "Browse the LinkedIn feed"},
 		{"profile", "View a LinkedIn profile"},
 		{"alerts", "Manage job alerts"},
 		{"status", "Show API and auth status"},
