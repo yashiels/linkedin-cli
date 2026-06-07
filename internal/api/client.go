@@ -90,11 +90,11 @@ func (c *Client) QueryGraphQL(queryName, queryID string, variables interface{}) 
 
 	// Build URL.
 	u, _ := url.Parse(baseURL + graphQLPath)
-	q := u.Query()
-	q.Set("queryId", queryID)
-	q.Set("variables", varStr)
-	q.Set("queryName", queryName)
-	u.RawQuery = q.Encode()
+	// Build raw query manually to avoid double-encoding the RestLi variables.
+	// The RestLi encoder already URL-encodes special characters within values.
+	u.RawQuery = "queryId=" + url.QueryEscape(queryID) +
+		"&queryName=" + url.QueryEscape(queryName) +
+		"&variables=" + varStr
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
