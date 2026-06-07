@@ -97,6 +97,7 @@ func runApply(cmd *cobra.Command, jobID string, opts runApplyOpts) error {
 	client := api.New(creds,
 		api.WithVerbose(opts.verbose),
 		api.WithDebug(opts.debug),
+		api.WithErrWriter(os.Stderr),
 	)
 
 	// Step 1: Fetch job detail for context.

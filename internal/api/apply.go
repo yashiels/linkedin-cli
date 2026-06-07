@@ -54,6 +54,15 @@ func (c *Client) CheckEasyApply(jobID string) (*EasyApplyStatus, error) {
 
 // parseEasyApplyCheck extracts prefill and availability data from the
 // onsite apply check response.
+//
+// Current Voyager GraphQL response structure:
+//
+//	data.jobsDashOnsiteApplyApplicationByJobPosting.elements[0].jobSeekerApplicationDetail
+//	  .onsiteApply     bool
+//	  .applyCtaText    {text: "Easy Apply"}
+//	  .resume          null | {name: "..."}
+//	  .emailAddress    string (may be absent)
+//	  .mobilePhone     string (may be absent)
 func parseEasyApplyCheck(raw json.RawMessage) (*EasyApplyStatus, error) {
 	var envelope map[string]interface{}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
@@ -64,54 +73,75 @@ func parseEasyApplyCheck(raw json.RawMessage) (*EasyApplyStatus, error) {
 
 	// Navigate to the data section.
 	data := nav(envelope, "data")
-	var app interface{}
+	if data == nil {
+		return status, nil
+	}
 
+	// Find the first collection object under data.
+	// (e.g. jobsDashOnsiteApplyApplicationByJobPosting)
+	var collection interface{}
 	if dm, ok := data.(map[string]interface{}); ok {
 		for _, v := range dm {
 			if _, ok := v.(map[string]interface{}); ok {
-				app = v
+				collection = v
 				break
 			}
 		}
 	}
-
-	if app == nil {
-		// No application data — job does not support Easy Apply.
+	if collection == nil {
 		return status, nil
 	}
 
-	// Check the $type to confirm Easy Apply.
-	appType := strPath(app, "$type")
-	if appType != "" {
+	// Navigate into elements[0] — the actual application record.
+	elements := arr(nav(collection, "elements"))
+	var appDetail interface{}
+	if len(elements) > 0 {
+		// Prefer jobSeekerApplicationDetail sub-object; fall back to the element itself.
+		appDetail = nav(elements[0], "jobSeekerApplicationDetail")
+		if appDetail == nil {
+			appDetail = elements[0]
+		}
+	} else {
+		// Older shape: collection is the application directly.
+		appDetail = collection
+	}
+
+	if appDetail == nil {
+		return status, nil
+	}
+
+	// Available: onsiteApply flag, applyCtaText presence, or $type field.
+	if boolVal(nav(appDetail, "onsiteApply")) {
+		status.Available = true
+	}
+	if strPath(appDetail, "applyCtaText", "text") != "" {
+		status.Available = true
+	}
+	if strPath(appDetail, "$type") != "" {
 		status.Available = true
 	}
 
-	// Extract available prefill data.
-	if name := strPath(app, "applicantName"); name != "" {
+	// Prefill data (may not be present for all jobs / account states).
+	if name := strPath(appDetail, "applicantName"); name != "" {
 		status.Name = name
 	}
-	if name := strPath(app, "firstName"); name != "" {
-		lastName := strPath(app, "lastName")
-		status.Name = name + " " + lastName
+	if fn := strPath(appDetail, "firstName"); fn != "" {
+		status.Name = fn + " " + strPath(appDetail, "lastName")
 	}
-	if email := strPath(app, "emailAddress"); email != "" {
+	if email := strPath(appDetail, "emailAddress"); email != "" {
 		status.Email = email
 	}
-	if phone := strPath(app, "mobilePhoneNumber"); phone != "" {
+	if phone := strPath(appDetail, "mobilePhoneNumber"); phone != "" {
 		status.Phone = phone
 	}
-
-	// Resume name.
-	if resumeName := strPath(app, "resume", "name"); resumeName != "" {
-		status.Resume = resumeName
+	if rn := strPath(appDetail, "resume", "name"); rn != "" {
+		status.Resume = rn
 	}
 	if status.Resume == "" {
-		if resumeName := strPath(app, "resumeDocumentName"); resumeName != "" {
-			status.Resume = resumeName
-		}
+		status.Resume = strPath(appDetail, "resumeDocumentName")
 	}
 
-	// If we got any form data, treat Easy Apply as available.
+	// If any prefill data exists, confirm Easy Apply is available.
 	if status.Name != "" || status.Email != "" {
 		status.Available = true
 	}

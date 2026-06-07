@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -83,6 +84,7 @@ func runJobDetail(cmd *cobra.Command, jobID string, opts runJobDetailOpts) error
 	clientOpts := []api.Option{
 		api.WithVerbose(opts.verbose),
 		api.WithDebug(opts.debug),
+		api.WithErrWriter(os.Stderr),
 	}
 	client := api.New(creds, clientOpts...)
 

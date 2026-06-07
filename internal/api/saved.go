@@ -19,13 +19,17 @@ func (c *Client) GetSavedJobs(count int) ([]types.JobCard, error) {
 		count = 25
 	}
 
-	// LinkedIn saved jobs are accessed via the "SAVED_JOBS" job collection type.
+	// JobCardsByJobCollections requires:
+	//   jobCollectionSlug (String!)  — the collection slug ("savedJobs")
+	//   query (JobSearchQueryInput!) — minimal search context; origin must be a valid enum
 	vars := map[string]interface{}{
-		"count": count,
-		"start": 0,
+		"count":             count,
+		"start":             0,
+		"jobCollectionSlug": "savedJobs",
+		"includeJobState":   true,
 		"query": map[string]interface{}{
-			"flagshipSearchIntent": "SEARCH_SRP",
-			"collections":          []string{"savedJobs"},
+			"origin":   "JOB_SEARCH_PAGE_SEARCH_BUTTON",
+			"keywords": "",
 		},
 	}
 

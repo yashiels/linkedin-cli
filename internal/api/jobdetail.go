@@ -122,11 +122,8 @@ func parseJobDetail(raw json.RawMessage, originalID string) (*types.JobDetail, e
 	detail.ListingURL = "https://www.linkedin.com/jobs/view/" + bareID
 
 	// Navigate to the elements array.
-	// Typical path: data → jobsDashJobPostingDetailSectionsByCardSectionTypesV2 → elements
+	// Typical path: data → jobsDashJobPostingDetailSectionsByCardSectionTypes → elements
 	data := nav(envelope, "data")
-
-	// LinkedIn wraps responses with the (camelCased) query name as the key.
-	// We search for any key that contains "elements" or try known paths.
 	var elements []interface{}
 	if dm, ok := data.(map[string]interface{}); ok {
 		for _, v := range dm {
@@ -145,184 +142,168 @@ func parseJobDetail(raw json.RawMessage, originalID string) (*types.JobDetail, e
 		return nil, fmt.Errorf("job detail: no section elements found in response (job may not exist or be expired)")
 	}
 
-	// Process each section by type.
+	// Current Voyager GraphQL response: each top-level element wraps a
+	// "jobPostingDetailSection" array. Sections identify themselves by which
+	// sub-key is non-null (topCardV2, jobDescription, etc.) rather than via a
+	// "cardSectionType" discriminant.
 	for _, elem := range elements {
-		sectionType := strPath(elem, "cardSectionType")
-		switch sectionType {
-		case "TOP_CARD_V2":
-			parseTopCard(detail, elem)
-		case "JOB_DESCRIPTION_CARD":
-			parseDescriptionCard(detail, elem)
+		sections := arr(nav(elem, "jobPostingDetailSection"))
+		for _, section := range sections {
+			if topCard := nav(section, "topCardV2"); topCard != nil {
+				parseTopCard(detail, topCard)
+			}
+			if jobDesc := nav(section, "jobDescription"); jobDesc != nil {
+				parseDescriptionCard(detail, jobDesc)
+			}
+		}
+		// Legacy / fallback: sections without the jobPostingDetailSection wrapper.
+		if topCard := nav(elem, "topCardV2"); topCard != nil {
+			parseTopCard(detail, topCard)
+		}
+		if jobDesc := nav(elem, "jobDescription"); jobDesc != nil {
+			parseDescriptionCard(detail, jobDesc)
 		}
 	}
 
 	return detail, nil
 }
 
-// parseTopCard extracts header information from a TOP_CARD_V2 section.
-func parseTopCard(d *types.JobDetail, section interface{}) {
-	// LinkedIn nests components under "topCard", "components", or directly.
-	// We try multiple common paths because the schema varies across API versions.
+// parseTopCard extracts header information from a topCardV2 section object.
+// The argument is the topCardV2 value — not the outer section wrapper.
+func parseTopCard(d *types.JobDetail, topCard interface{}) {
+	// Current Voyager structure: topCardV2.jobPostingCard contains most fields.
+	jpc := nav(topCard, "jobPostingCard")
+	if jpc == nil {
+		jpc = topCard // fall back: treat topCard itself as the card
+	}
 
-	// Try topCard.jobPostingTitle first.
-	if t := strPath(section, "topCard", "jobPostingTitle", "title"); t != "" {
+	// Title: jobPostingCard.jobPostingTitle (preferred) or jobPosting.title.
+	if t := strPath(jpc, "jobPostingTitle"); t != "" {
 		d.Title = t
 	}
-	// Alternate: components.headerComponent.title
 	if d.Title == "" {
-		if t := strPath(section, "components", "headerComponent", "title"); t != "" {
-			d.Title = t
-		}
-	}
-	// Fallback: any "title" key inside the section.
-	if d.Title == "" {
-		if t := strPath(section, "title"); t != "" {
-			d.Title = t
-		}
+		d.Title = strPath(jpc, "jobPosting", "title")
 	}
 
-	// Company name.
-	if c := strPath(section, "topCard", "companyName"); c != "" {
+	// Company: jobPostingCard.primaryDescription.text
+	if c := strPath(jpc, "primaryDescription", "text"); c != "" {
 		d.Company = c
 	}
 	if d.Company == "" {
-		if c := strPath(section, "components", "headerComponent", "subtitle", "text"); c != "" {
-			d.Company = c
-		}
+		d.Company = strPath(jpc, "jobPosting", "companyDetails", "jobCompany", "company", "name")
 	}
 	if d.Company == "" {
-		d.Company = str(nav(section, "companyName"))
+		d.Company = strPath(jpc, "navigationBarSubtitle")
+		// navigationBarSubtitle is "Company · Location" — take only the company part.
+		if idx := strings.Index(d.Company, " · "); idx >= 0 {
+			d.Company = strings.TrimSpace(d.Company[:idx])
+		}
 	}
 
 	// Company URN.
-	if cu := strPath(section, "topCard", "companyResolutionResult", "entityUrn"); cu != "" {
+	if cu := strPath(jpc, "jobPosting", "companyDetails", "jobCompany", "company", "entityUrn"); cu != "" {
 		d.CompanyURN = cu
 	}
 
-	// Location.
-	if loc := strPath(section, "topCard", "formattedLocation"); loc != "" {
-		d.Location = loc
-	}
-	if d.Location == "" {
-		if loc := strPath(section, "components", "headerComponent", "caption", "text"); loc != "" {
-			d.Location = loc
+	// Location, PostedAt, ApplicantCount from tertiaryDescription.text.
+	// The text format is: "Location · Time ago · Applicant count<extra text>"
+	if tertiary := strPath(jpc, "tertiaryDescription", "text"); tertiary != "" {
+		parts := strings.SplitN(tertiary, " · ", 3)
+		if len(parts) >= 1 && d.Location == "" {
+			d.Location = strings.TrimSpace(parts[0])
+		}
+		if len(parts) >= 2 && d.PostedAt == "" {
+			d.PostedAt = strings.TrimSpace(parts[1])
+		}
+		if len(parts) >= 3 && d.ApplicantCount == "" {
+			part := parts[2]
+			// LinkedIn concatenates "Over 100 applicants" with trailing text — cut at "applicant".
+			if idx := strings.Index(part, "applicants"); idx >= 0 {
+				d.ApplicantCount = strings.TrimSpace(part[:idx+len("applicants")])
+			} else if idx := strings.Index(part, "applicant"); idx >= 0 {
+				d.ApplicantCount = strings.TrimSpace(part[:idx+len("applicant")])
+			}
 		}
 	}
-	if d.Location == "" {
-		d.Location = str(nav(section, "formattedLocation"))
-	}
 
-	// Posted date — comes as "listedAt" (unix ms) or "formattedTimePeriod".
-	if p := strPath(section, "topCard", "postingDateText"); p != "" {
-		d.PostedAt = p
-	}
-	if d.PostedAt == "" {
-		if p := strPath(section, "components", "insightsComponent", "insightViewModels"); p != "" {
-			// It's sometimes in the insights component.
-		}
-		d.PostedAt = str(nav(section, "postingDateText"))
-	}
-
-	// Applicant count — typically a string like "45 applicants".
-	if ac := strPath(section, "topCard", "applicantCountText"); ac != "" {
-		d.ApplicantCount = ac
-	}
-	if d.ApplicantCount == "" {
-		d.ApplicantCount = str(nav(section, "applicantCountText"))
-	}
-
-	// Easy Apply flag.
-	if ea := nav(section, "topCard", "easyApplyEnabled"); ea != nil {
-		d.EasyApply = boolVal(ea)
-	}
-	if !d.EasyApply {
-		if ea := nav(section, "easyApplyEnabled"); ea != nil {
-			d.EasyApply = boolVal(ea)
-		}
-	}
-	// Also check jobState for apply method.
-	if am := strPath(section, "topCard", "applyMethod", "$type"); strings.Contains(am, "EasyApply") {
+	// Easy Apply: onsiteApply flag or "Easy Apply" CTA text.
+	if boolVal(nav(jpc, "primaryActionV2", "applyJobAction", "applyJobActionResolutionResult", "onsiteApply")) {
 		d.EasyApply = true
 	}
-
-	// Salary.
-	parseSalary(d, section)
-
-	// Seniority / employment type.
-	if sl := strPath(section, "topCard", "jobInsight", "text"); sl != "" {
-		// "Mid-Senior level · Full-time" format
-		parts := strings.SplitN(sl, " · ", 2)
-		if len(parts) == 2 {
-			d.SeniorityLevel = strings.TrimSpace(parts[0])
-			d.EmploymentType = strings.TrimSpace(parts[1])
-		} else {
-			d.SeniorityLevel = sl
+	if !d.EasyApply {
+		cta := strPath(jpc, "primaryActionV2", "applyJobAction", "applyJobActionResolutionResult", "applyCtaText", "text")
+		if strings.Contains(strings.ToLower(cta), "easy apply") {
+			d.EasyApply = true
 		}
 	}
+
+	// Salary, employment type, seniority level from job insights.
+	parseSalaryFromInsights(d, jpc)
 
 	// Job expired / closed.
-	if closed := nav(section, "topCard", "jobState", "closed"); closed != nil {
-		d.Expired = boolVal(closed)
+	if str(nav(jpc, "jobPosting", "jobState")) == "CLOSED" {
+		d.Expired = true
 	}
 }
 
-// parseSalary extracts salary information from various possible locations.
-func parseSalary(d *types.JobDetail, section interface{}) {
-	// Compensation/salary can live in multiple places.
-	paths := [][]string{
-		{"topCard", "salaryInsight", "text"},
-		{"topCard", "compensationBenefit", "compensationBenefitText"},
-		{"topCard", "compensationInsight", "text"},
-		{"salaryInsight", "text"},
+// parseSalaryFromInsights extracts salary, employment type, and seniority level
+// from the jobInsightsV2ResolutionResults array in the jobPostingCard.
+func parseSalaryFromInsights(d *types.JobDetail, jpc interface{}) {
+	knownEmploymentTypes := map[string]bool{
+		"Full-time": true, "Part-time": true, "Contract": true,
+		"Internship": true, "Temporary": true, "Volunteer": true, "Other": true,
 	}
-	for _, path := range paths {
-		if s := strPath(section, path...); s != "" {
-			d.Salary = s
-			return
-		}
+	knownSeniorityLevels := map[string]bool{
+		"Entry level": true, "Mid-Senior level": true, "Associate": true,
+		"Director": true, "Executive": true, "Not Applicable": true,
 	}
 
-	// Numeric salary range.
-	minV := nav(section, "topCard", "salaryInsight", "compensationBreakdown", "minSalary")
-	maxV := nav(section, "topCard", "salaryInsight", "compensationBreakdown", "maxSalary")
-	curr := strPath(section, "topCard", "salaryInsight", "compensationBreakdown", "currencyCode")
-	if minV != nil || maxV != nil {
-		if minF, ok := minV.(float64); ok {
-			d.SalaryMin = int64(minF)
-		}
-		if maxF, ok := maxV.(float64); ok {
-			d.SalaryMax = int64(maxF)
-		}
-		if curr != "" {
-			d.SalaryCurr = curr
-		}
-		if d.SalaryMin > 0 && d.SalaryMax > 0 {
-			d.Salary = fmt.Sprintf("%s %d–%d/yr", d.SalaryCurr, d.SalaryMin, d.SalaryMax)
+	insights := arr(nav(jpc, "jobInsightsV2ResolutionResults"))
+	for _, insight := range insights {
+		descriptions := arr(nav(insight, "jobInsightViewModel", "description"))
+		for _, desc := range descriptions {
+			text := strPath(desc, "text", "text")
+			if text == "" {
+				continue
+			}
+			switch {
+			case knownEmploymentTypes[text]:
+				d.EmploymentType = text
+			case knownSeniorityLevels[text]:
+				d.SeniorityLevel = text
+			case d.Salary == "" &&
+				(strings.Contains(text, "/yr") || strings.Contains(text, "/mo") ||
+					strings.Contains(text, "/hr") || strings.Contains(text, "K/yr")):
+				d.Salary = text
+			}
 		}
 	}
 }
 
-// parseDescriptionCard extracts the job description from a JOB_DESCRIPTION_CARD section.
-func parseDescriptionCard(d *types.JobDetail, section interface{}) {
-	// Try several possible paths for the description HTML/text.
-	paths := [][]string{
-		{"jobDescriptionCard", "descriptionSnippet", "text"},
+// parseDescriptionCard extracts the job description from a jobDescription section object.
+// The argument is the jobDescription value — not the outer section wrapper.
+func parseDescriptionCard(d *types.JobDetail, jobDesc interface{}) {
+	// Current Voyager structure: jobDescription.jobPosting.description.text
+	if text := strPath(jobDesc, "jobPosting", "description", "text"); text != "" {
+		d.Description = text
+		return
+	}
+	// Posted date fallback: jobDescription.postedOnText.
+	if d.PostedAt == "" {
+		if posted := strPath(jobDesc, "postedOnText"); posted != "" {
+			d.PostedAt = posted
+		}
+	}
+	// Legacy fallback paths (older Voyager API versions).
+	for _, path := range [][]string{
 		{"jobDescriptionCard", "description", "text"},
+		{"jobDescriptionCard", "descriptionSnippet", "text"},
 		{"components", "descriptionComponent", "text", "text"},
 		{"description", "text"},
 		{"descriptionSnippet", "text"},
-	}
-	for _, path := range paths {
-		if s := strPath(section, path...); s != "" {
+	} {
+		if s := strPath(jobDesc, path...); s != "" {
 			d.Description = s
-			return
-		}
-	}
-
-	// Sometimes description is nested differently.
-	if jdc := nav(section, "jobDescriptionCard"); jdc != nil {
-		if t := strPath(jdc, "description", "text"); t != "" {
-			d.Description = t
 			return
 		}
 	}

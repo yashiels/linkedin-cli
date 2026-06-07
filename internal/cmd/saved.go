@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -95,6 +96,7 @@ func runSavedList(cmd *cobra.Command, opts runSavedListOpts) error {
 	client := api.New(creds,
 		api.WithVerbose(opts.verbose),
 		api.WithDebug(opts.debug),
+		api.WithErrWriter(os.Stderr),
 	)
 
 	// Fetch saved jobs.

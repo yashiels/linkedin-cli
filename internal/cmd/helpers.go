@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -32,6 +33,7 @@ func newAPIClient(cmd *cobra.Command) (*api.Client, error) {
 	return api.New(creds,
 		api.WithVerbose(verbose),
 		api.WithDebug(debug),
+		api.WithErrWriter(os.Stderr),
 	), nil
 }
 
