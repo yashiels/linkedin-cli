@@ -231,16 +231,21 @@ func parseGenericURN(urn string) (string, error) {
 }
 
 // SaveJob saves a job to the user's saved jobs collection.
-// Endpoint: POST /voyager/api/voyagerJobsDashSavedJobPosts
-// Body: {"jobPostingUrn": "urn:li:fsd_jobPosting:..."}
+//
+// Endpoint: POST /voyager/api/voyagerJobsDashJobCollectionSubscriptions
+// Body: {"jobCollectionSlug": "savedJobs", "jobPosting": "<urn>"}
+//
+// Note: The old /voyagerJobsDashSavedJobPosts path returns 404 (discontinued).
+// The current endpoint is voyagerJobsDashJobCollectionSubscriptions which
+// manages saved-job collection subscriptions.
 func (c *Client) SaveJob(jobID string) error {
 	urn := normaliseJobURN(jobID)
-	body := map[string]string{
-		"jobPostingUrn": urn,
+	body := map[string]interface{}{
+		"jobCollectionSlug": "savedJobs",
+		"jobPosting":        urn,
 	}
-	// Plain POST (no ?action=... query param) — standard Restli collection create.
 	_, err := c.PostJSON(
-		"/voyager/api/voyagerJobsDashSavedJobPosts",
+		"/voyager/api/voyagerJobsDashJobCollectionSubscriptions",
 		nil,
 		body,
 	)
@@ -251,10 +256,15 @@ func (c *Client) SaveJob(jobID string) error {
 }
 
 // UnsaveJob removes a job from the user's saved jobs collection.
-// Endpoint: DELETE /voyager/api/voyagerJobsDashSavedJobPosts/<encoded-urn>
+//
+// Endpoint: DELETE /voyager/api/voyagerJobsDashJobCollectionSubscriptions/<compound-key>
+// The compound key encodes the collection slug and job URN in Rest.li format:
+//
+//	(jobCollectionSlug:savedJobs,jobPosting:urn%3Ali%3Afsd_jobPosting%3A...)
 func (c *Client) UnsaveJob(jobID string) error {
 	urn := normaliseJobURN(jobID)
-	// LinkedIn uses the URN as path-encoded resource identifier.
-	encoded := url.PathEscape(urn)
-	return c.DeleteResource("/voyager/api/voyagerJobsDashSavedJobPosts/" + encoded)
+	// Rest.li compound key: (jobCollectionSlug:savedJobs,jobPosting:<url-encoded-urn>)
+	encodedURN := url.QueryEscape(urn)
+	compoundKey := "(jobCollectionSlug:savedJobs,jobPosting:" + encodedURN + ")"
+	return c.DeleteResource("/voyager/api/voyagerJobsDashJobCollectionSubscriptions/" + compoundKey)
 }
