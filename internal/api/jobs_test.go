@@ -36,13 +36,9 @@ func TestBuildSearchVars_MinimalParams(t *testing.T) {
 		t.Errorf("expected spellCorrectionEnabled=true")
 	}
 
-	filters, ok := q["selectedFilters"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("selectedFilters should be a map")
-	}
-	rt, ok := filters["resultType"].([]string)
-	if !ok || len(rt) != 1 || rt[0] != "JOBS" {
-		t.Errorf("expected resultType=[JOBS], got %v", filters["resultType"])
+	// With no filters set, selectedFilters must be absent (not even an empty map).
+	if _, hasFilters := q["selectedFilters"]; hasFilters {
+		t.Error("expected no selectedFilters when no filter flags are set")
 	}
 
 	// No location should mean no locationUnion.
@@ -118,12 +114,51 @@ func TestExtractElements_EmptyData(t *testing.T) {
 }
 
 func TestExtractElements_Shape1(t *testing.T) {
+	// Primary shape: data value contains jobsDashJobCardsByJobSearch (current Voyager API).
 	raw := json.RawMessage(`{
-		"data": {
-			"jobCardsByJobSearch": {
-				"paging": {"count": 10, "start": 0, "total": 42},
-				"elements": [{"title": "Engineer"}, {"title": "Developer"}]
-			}
+		"jobsDashJobCardsByJobSearch": {
+			"paging": {"count": 10, "start": 0, "total": 42},
+			"elements": [{"title": "Engineer"}, {"title": "Developer"}]
+		}
+	}`)
+	elems, total, err := extractElements(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != 42 {
+		t.Errorf("expected total=42, got %d", total)
+	}
+	if len(elems) != 2 {
+		t.Errorf("expected 2 elements, got %d", len(elems))
+	}
+}
+
+func TestExtractElements_Shape1_DeepLink(t *testing.T) {
+	// Feed variant uses jobsDashJobCardsByJobSearchDeepLink.
+	raw := json.RawMessage(`{
+		"jobsDashJobCardsByJobSearchDeepLink": {
+			"paging": {"count": 5, "start": 0, "total": 99},
+			"elements": [{"title": "PM"}]
+		}
+	}`)
+	elems, total, err := extractElements(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != 99 {
+		t.Errorf("expected total=99, got %d", total)
+	}
+	if len(elems) != 1 {
+		t.Errorf("expected 1 element, got %d", len(elems))
+	}
+}
+
+func TestExtractElements_Shape1_OldKey(t *testing.T) {
+	// Fallback: old key name without the "jobsDash" prefix.
+	raw := json.RawMessage(`{
+		"jobCardsByJobSearch": {
+			"paging": {"count": 10, "start": 0, "total": 42},
+			"elements": [{"title": "Engineer"}, {"title": "Developer"}]
 		}
 	}`)
 	elems, total, err := extractElements(raw)
@@ -267,15 +302,14 @@ func TestParseJobCards_EmptyResponse(t *testing.T) {
 }
 
 func TestParseJobCards_WithIncluded(t *testing.T) {
+	// Older response shape: elements contain URN references resolved via included[].
 	raw := json.RawMessage(`{
 		"data": {
-			"data": {
-				"jobCardsByJobSearch": {
-					"paging": {"total": 1},
-					"elements": [
-						{"*jobPosting": "urn:li:fsd_jobPosting:9999"}
-					]
-				}
+			"jobsDashJobCardsByJobSearch": {
+				"paging": {"total": 1},
+				"elements": [
+					{"*jobPosting": "urn:li:fsd_jobPosting:9999"}
+				]
 			}
 		},
 		"included": [
@@ -303,6 +337,112 @@ func TestParseJobCards_WithIncluded(t *testing.T) {
 	}
 	if cards[0].Title != "Go Developer" {
 		t.Errorf("expected title 'Go Developer', got %q", cards[0].Title)
+	}
+}
+
+func TestParseJobCards_VoyagerV2(t *testing.T) {
+	// Current Voyager GraphQL v2 shape: elements contain jobCard.jobPostingCard objects.
+	raw := json.RawMessage(`{
+		"data": {
+			"jobsDashJobCardsByJobSearch": {
+				"paging": {"count": 1, "start": 0, "total": 507},
+				"elements": [{
+					"jobCard": {
+						"jobPostingCard": {
+							"jobPostingTitle": "Frontend Developer - Remote",
+							"primaryDescription": {"text": "YO IT Consulting"},
+							"secondaryDescription": {"text": "South Africa (Remote)"},
+							"tertiaryDescription": {"text": "ZAR30K/yr - ZAR35K/yr"},
+							"jobPosting": {
+								"entityUrn": "urn:li:fsd_jobPosting:4414051567",
+								"title": "Frontend Developer - Remote",
+								"repostedJob": false
+							},
+							"footerItems": [
+								{"type": "LISTED_DATE", "timeAt": 1779414259000},
+								{"type": "EASY_APPLY_TEXT", "text": {"text": "Easy Apply"}}
+							],
+							"entityUrn": "urn:li:fsd_jobPostingCard:(4414051567,JOBS_SEARCH)"
+						}
+					}
+				}]
+			}
+		},
+		"included": []
+	}`)
+
+	cards, total, err := parseJobCards(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if total != 507 {
+		t.Errorf("expected total=507, got %d", total)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(cards))
+	}
+	card := cards[0]
+	if card.ID != "4414051567" {
+		t.Errorf("expected ID=4414051567, got %q", card.ID)
+	}
+	if card.Title != "Frontend Developer - Remote" {
+		t.Errorf("expected title 'Frontend Developer - Remote', got %q", card.Title)
+	}
+	if card.Company != "YO IT Consulting" {
+		t.Errorf("expected company 'YO IT Consulting', got %q", card.Company)
+	}
+	if card.Location != "South Africa (Remote)" {
+		t.Errorf("expected location 'South Africa (Remote)', got %q", card.Location)
+	}
+	if !card.EasyApply {
+		t.Error("expected EasyApply=true (EASY_APPLY_TEXT footer item present)")
+	}
+	if !card.Remote {
+		t.Error("expected Remote=true (location contains 'Remote')")
+	}
+	if card.URN != "urn:li:fsd_jobPosting:4414051567" {
+		t.Errorf("expected URN from jobPosting.entityUrn, got %q", card.URN)
+	}
+}
+
+func TestExtractJobCardFromPostingCard(t *testing.T) {
+	raw := json.RawMessage(`{
+		"jobPostingTitle": "Staff Engineer",
+		"primaryDescription": {"text": "BigCorp"},
+		"secondaryDescription": {"text": "Cape Town, South Africa"},
+		"jobPosting": {
+			"entityUrn": "urn:li:fsd_jobPosting:123456"
+		},
+		"footerItems": [
+			{"type": "LISTED_DATE", "timeAt": 1779000000000}
+		],
+		"entityUrn": "urn:li:fsd_jobPostingCard:(123456,JOBS_SEARCH)"
+	}`)
+
+	card, err := extractJobCardFromPostingCard(raw, map[string]json.RawMessage{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if card.ID != "123456" {
+		t.Errorf("expected ID=123456, got %q", card.ID)
+	}
+	if card.URN != "urn:li:fsd_jobPosting:123456" {
+		t.Errorf("expected URN from jobPosting (not card), got %q", card.URN)
+	}
+	if card.Title != "Staff Engineer" {
+		t.Errorf("expected title 'Staff Engineer', got %q", card.Title)
+	}
+	if card.Company != "BigCorp" {
+		t.Errorf("expected company 'BigCorp', got %q", card.Company)
+	}
+	if card.Location != "Cape Town, South Africa" {
+		t.Errorf("expected location, got %q", card.Location)
+	}
+	if card.EasyApply {
+		t.Error("expected EasyApply=false (no EASY_APPLY_TEXT footer item)")
+	}
+	if card.Remote {
+		t.Error("expected Remote=false (location does not contain 'remote')")
 	}
 }
 

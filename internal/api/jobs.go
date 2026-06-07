@@ -64,10 +64,9 @@ func (c *Client) FetchFeed(count, start int) ([]types.JobCard, int, error) {
 
 // buildSearchVars constructs the RestLi-encodable variable map for a job search.
 func buildSearchVars(p JobSearchParams) map[string]interface{} {
-	// Build selected filters (only include non-empty filters).
-	filters := map[string]interface{}{
-		"resultType": []string{"JOBS"},
-	}
+	// Build selected filters. The web/browser API uses a different schema
+	// than the mobile app — only include filters that are actually set.
+	filters := map[string]interface{}{}
 	if p.EasyApply {
 		filters["applyWithLinkedin"] = []string{"true"}
 	}
@@ -80,11 +79,6 @@ func buildSearchVars(p JobSearchParams) map[string]interface{} {
 	if p.PostedRange != "" {
 		filters["timePostedRange"] = []string{p.PostedRange}
 	}
-	sort := p.Sort
-	if sort == "" {
-		sort = "DD"
-	}
-	filters["sortBy"] = []string{sort}
 
 	// Build location union.
 	var locationUnion map[string]interface{}
@@ -98,8 +92,10 @@ func buildSearchVars(p JobSearchParams) map[string]interface{} {
 	queryInner := map[string]interface{}{
 		"keywords":               p.Keywords,
 		"origin":                 "JOB_SEARCH_PAGE_SEARCH_BUTTON",
-		"selectedFilters":        filters,
 		"spellCorrectionEnabled": true,
+	}
+	if len(filters) > 0 {
+		queryInner["selectedFilters"] = filters
 	}
 	if locationUnion != nil {
 		queryInner["locationUnion"] = locationUnion
@@ -199,70 +195,91 @@ func buildEntityMap(included []json.RawMessage) map[string]json.RawMessage {
 
 // extractElements navigates the data envelope to find job card elements.
 // LinkedIn's Voyager API nests results differently depending on the query.
+//
+// NOTE: this function receives resp.Data (the value under "data"), not the
+// full response envelope. All key lookups are therefore relative to that object.
 func extractElements(dataRaw json.RawMessage) ([]json.RawMessage, int, error) {
 	if dataRaw == nil {
 		return nil, 0, fmt.Errorf("jobs: empty data in response")
 	}
 
-	// Try shape 1: {data: {jobCardsByJobSearch: {elements: [...], paging: {...}}}}
-	var shape1 struct {
-		Data struct {
-			JobCardsByJobSearch *struct {
-				Paging struct {
-					Total int `json:"total"`
-				} `json:"paging"`
-				Elements []json.RawMessage `json:"elements"`
-			} `json:"jobCardsByJobSearch"`
-			JobCardsByJobSearchDeepLink *struct {
-				Paging struct {
-					Total int `json:"total"`
-				} `json:"paging"`
-				Elements []json.RawMessage `json:"elements"`
-			} `json:"jobCardsByJobSearchDeepLink"`
-		} `json:"data"`
+	// Primary shape — current Voyager GraphQL: data contains the result
+	// collection keyed by query name ("jobsDashJobCardsByJobSearch" for search,
+	// "jobsDashJobCardsByJobSearchDeepLink" for feed).
+	var primary struct {
+		Search *struct {
+			Paging struct {
+				Total int `json:"total"`
+			} `json:"paging"`
+			Elements []json.RawMessage `json:"elements"`
+		} `json:"jobsDashJobCardsByJobSearch"`
+		DeepLink *struct {
+			Paging struct {
+				Total int `json:"total"`
+			} `json:"paging"`
+			Elements []json.RawMessage `json:"elements"`
+		} `json:"jobsDashJobCardsByJobSearchDeepLink"`
 	}
-	if err := json.Unmarshal(dataRaw, &shape1); err == nil {
-		if s := shape1.Data.JobCardsByJobSearch; s != nil && len(s.Elements) > 0 {
+	if err := json.Unmarshal(dataRaw, &primary); err == nil {
+		if s := primary.Search; s != nil && len(s.Elements) > 0 {
 			return s.Elements, s.Paging.Total, nil
 		}
-		if s := shape1.Data.JobCardsByJobSearchDeepLink; s != nil && len(s.Elements) > 0 {
+		if s := primary.DeepLink; s != nil && len(s.Elements) > 0 {
 			return s.Elements, s.Paging.Total, nil
 		}
 	}
 
-	// Try shape 2: {jobCardsByJobSearchData: {elements: [...], paging: {...}}}
-	var shape2 struct {
-		JobCardsByJobSearchData *struct {
+	// Fallback — older key names without the "jobsDash" prefix.
+	var fallback struct {
+		Search *struct {
+			Paging struct {
+				Total int `json:"total"`
+			} `json:"paging"`
+			Elements []json.RawMessage `json:"elements"`
+		} `json:"jobCardsByJobSearch"`
+		DeepLink *struct {
+			Paging struct {
+				Total int `json:"total"`
+			} `json:"paging"`
+			Elements []json.RawMessage `json:"elements"`
+		} `json:"jobCardsByJobSearchDeepLink"`
+		SearchData *struct {
 			Paging struct {
 				Total int `json:"total"`
 			} `json:"paging"`
 			Elements []json.RawMessage `json:"elements"`
 		} `json:"jobCardsByJobSearchData"`
-		JobCardsByJobSearchDeepLinkData *struct {
+		DeepLinkData *struct {
 			Paging struct {
 				Total int `json:"total"`
 			} `json:"paging"`
 			Elements []json.RawMessage `json:"elements"`
 		} `json:"jobCardsByJobSearchDeepLinkData"`
 	}
-	if err := json.Unmarshal(dataRaw, &shape2); err == nil {
-		if s := shape2.JobCardsByJobSearchData; s != nil && len(s.Elements) > 0 {
+	if err := json.Unmarshal(dataRaw, &fallback); err == nil {
+		if s := fallback.Search; s != nil && len(s.Elements) > 0 {
 			return s.Elements, s.Paging.Total, nil
 		}
-		if s := shape2.JobCardsByJobSearchDeepLinkData; s != nil && len(s.Elements) > 0 {
+		if s := fallback.DeepLink; s != nil && len(s.Elements) > 0 {
+			return s.Elements, s.Paging.Total, nil
+		}
+		if s := fallback.SearchData; s != nil && len(s.Elements) > 0 {
+			return s.Elements, s.Paging.Total, nil
+		}
+		if s := fallback.DeepLinkData; s != nil && len(s.Elements) > 0 {
 			return s.Elements, s.Paging.Total, nil
 		}
 	}
 
-	// Try shape 3: top-level elements array (some older API versions)
-	var shape3 struct {
+	// Last resort: top-level elements array (some older API versions).
+	var shapeTopLevel struct {
 		Paging struct {
 			Total int `json:"total"`
 		} `json:"paging"`
 		Elements []json.RawMessage `json:"elements"`
 	}
-	if err := json.Unmarshal(dataRaw, &shape3); err == nil && len(shape3.Elements) > 0 {
-		return shape3.Elements, shape3.Paging.Total, nil
+	if err := json.Unmarshal(dataRaw, &shapeTopLevel); err == nil && len(shapeTopLevel.Elements) > 0 {
+		return shapeTopLevel.Elements, shapeTopLevel.Paging.Total, nil
 	}
 
 	return nil, 0, nil // Return empty rather than error — caller handles gracefully.
@@ -292,6 +309,13 @@ func resolveJobCard(elem json.RawMessage, entityMap map[string]json.RawMessage) 
 	// Case: has "jobCard" wrapper.
 	if jobCardRaw, ok := generic["jobCard"]; ok {
 		return resolveJobCard(jobCardRaw, entityMap)
+	}
+
+	// Case: has "jobPostingCard" wrapper — Voyager GraphQL v2 shape.
+	// Must be checked before the generic "jobPosting" case because jobPostingCard
+	// objects contain a nested "jobPosting" sub-object that would be mishandled.
+	if jpcRaw, ok := generic["jobPostingCard"]; ok {
+		return extractJobCardFromPostingCard(jpcRaw, entityMap)
 	}
 
 	// Case: has "jobPosting" wrapper.
@@ -396,6 +420,94 @@ func extractJobCardFromEntity(entityRaw json.RawMessage, entityMap map[string]js
 		Company:   companyName,
 		Location:  entity.FormattedLocation,
 		PostedAt:  postedAt,
+		EasyApply: easyApply,
+		Remote:    remote,
+	}, nil
+}
+
+// jobPostingCardShape is the Voyager GraphQL v2 job card format.
+// Elements arrive as {jobCard: {jobPostingCard: <this>}}.
+type jobPostingCardShape struct {
+	JobPostingTitle    string `json:"jobPostingTitle"`
+	PrimaryDescription struct {
+		Text string `json:"text"`
+	} `json:"primaryDescription"`
+	SecondaryDescription struct {
+		Text string `json:"text"`
+	} `json:"secondaryDescription"`
+	TertiaryDescription struct {
+		Text string `json:"text"`
+	} `json:"tertiaryDescription"`
+	JobPosting struct {
+		EntityURN string `json:"entityUrn"`
+		Title     string `json:"title"`
+	} `json:"jobPosting"`
+	FooterItems []struct {
+		Type   string `json:"type"`
+		TimeAt int64  `json:"timeAt"`
+		Text   *struct {
+			Text string `json:"text"`
+		} `json:"text"`
+	} `json:"footerItems"`
+	EntityURN string `json:"entityUrn"`
+}
+
+// extractJobCardFromPostingCard converts the Voyager GraphQL v2 jobPostingCard
+// structure into a JobCard. Field sources:
+//
+//	title    ← jobPostingTitle (or jobPosting.title fallback)
+//	company  ← primaryDescription.text
+//	location ← secondaryDescription.text
+//	id / urn ← jobPosting.entityUrn (numeric ID parsed from URN)
+//	postedAt ← footerItems[type=LISTED_DATE].timeAt (unix ms)
+//	easyApply← footerItems[type=EASY_APPLY_TEXT] presence
+func extractJobCardFromPostingCard(raw json.RawMessage, _ map[string]json.RawMessage) (types.JobCard, error) {
+	var jpc jobPostingCardShape
+	if err := json.Unmarshal(raw, &jpc); err != nil {
+		return types.JobCard{}, fmt.Errorf("jobs: cannot parse jobPostingCard: %w", err)
+	}
+
+	// Prefer jobPosting.entityUrn for the canonical job URN/ID. The card's own
+	// entityUrn is a composite like "urn:li:fsd_jobPostingCard:(id,context)".
+	jobURN := jpc.JobPosting.EntityURN
+	if jobURN == "" {
+		jobURN = jpc.EntityURN
+	}
+	jobID := ""
+	if jobURN != "" {
+		if urn, err := types.ParseURN(jobURN); err == nil {
+			jobID = urn.ID
+		}
+	}
+
+	// Title: prefer the dedicated jobPostingTitle field.
+	title := jpc.JobPostingTitle
+	if title == "" {
+		title = jpc.JobPosting.Title
+	}
+
+	// Walk footerItems for listed date and easy-apply indicator.
+	var listedAt int64
+	easyApply := false
+	for _, fi := range jpc.FooterItems {
+		switch fi.Type {
+		case "LISTED_DATE":
+			listedAt = fi.TimeAt
+		case "EASY_APPLY_TEXT":
+			easyApply = true
+		}
+	}
+
+	location := jpc.SecondaryDescription.Text
+	remote := strings.Contains(strings.ToLower(location), "remote")
+
+	return types.JobCard{
+		URN:       jobURN,
+		ID:        jobID,
+		Title:     title,
+		Company:   jpc.PrimaryDescription.Text,
+		Location:  location,
+		PostedAt:  formatPostedTime(listedAt),
 		EasyApply: easyApply,
 		Remote:    remote,
 	}, nil
