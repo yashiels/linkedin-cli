@@ -24,7 +24,6 @@ func main() {
 }
 
 func newRootCmd() *cobra.Command {
-	// Persistent flag state — shared with subcommands.
 	var (
 		flagJSON    bool
 		flagPlain   bool
@@ -57,7 +56,6 @@ Common flags:
 		SilenceErrors: true,
 	}
 
-	// Persistent global flags available to every subcommand.
 	pf := root.PersistentFlags()
 	pf.BoolVar(&flagJSON, "json", false, "Output as JSON")
 	pf.BoolVar(&flagPlain, "plain", false, "Output as plain tab-separated text")
@@ -68,25 +66,25 @@ Common flags:
 	pf.BoolVar(&flagNoInput, "no-input", false, "Disable interactive prompts (fail instead)")
 	pf.StringVar(&flagConfig, "config", "", "Path to config file (default ~/.config/lnk/config.toml)")
 
-	// Wire subcommands.
+	// Wire all subcommands.
 	root.AddCommand(lnkcmd.NewAuthCmd(&flagNoInput))
 	root.AddCommand(lnkcmd.NewSearchCmd(&flagJSON, &flagPlain, &flagNoColor, &flagQuiet, &flagVerbose, &flagDebug))
 	root.AddCommand(lnkcmd.NewFeedCmd(&flagJSON, &flagPlain, &flagNoColor, &flagQuiet, &flagVerbose, &flagDebug))
+	root.AddCommand(lnkcmd.NewJobCmd(&flagNoInput, &flagJSON, &flagPlain, &flagQuiet, &flagVerbose, &flagDebug, &flagNoColor))
+	root.AddCommand(lnkcmd.NewApplyCmd(&flagNoInput, &flagJSON, &flagPlain, &flagQuiet, &flagVerbose, &flagDebug, &flagNoColor))
+	root.AddCommand(lnkcmd.NewSavedCmd(&flagNoInput, &flagJSON, &flagPlain, &flagQuiet, &flagVerbose, &flagDebug, &flagNoColor))
 
-	// Stub subcommands — implemented by other streams.
+	// Stub subcommands — implemented by stream 4.
 	stubs := []struct {
 		use   string
 		short string
 	}{
-		{"job", "View job details"},
-		{"apply", "Apply to a job"},
-		{"saved", "Manage saved jobs"},
 		{"profile", "View a LinkedIn profile"},
 		{"alerts", "Manage job alerts"},
 		{"status", "Show API and auth status"},
 	}
 	for _, s := range stubs {
-		s := s // capture
+		s := s
 		root.AddCommand(&cobra.Command{
 			Use:   s.use,
 			Short: s.short,
@@ -97,7 +95,6 @@ Common flags:
 		})
 	}
 
-	// Suppress flag parsing errors for flags declared only in sub-trees.
 	_ = flagJSON
 	_ = flagPlain
 	_ = flagQuiet
