@@ -218,15 +218,31 @@ func runSearch(keywords string, flags searchFlags) error {
 	client := api.New(creds, apiOpts...)
 
 	// Paginate to collect up to limit results.
+	// NOTE: LinkedIn's Voyager GraphQL API (voyagerJobsDashJobCards) does not
+	// accept filter field names inside selectedFilters for external callers; the
+	// filter variables are passed as top-level variables and LinkedIn may or may
+	// not honour them depending on the query schema version in use.
+	// Easy Apply is additionally enforced client-side since we can detect it from
+	// the EASY_APPLY_TEXT footerItem in the parsed job card.
 	allCards := make([]types.JobCard, 0, flags.limit)
 	pageSize := 10
 	start := 0
 	total := 0
 
+	// Fetch extra results when easy-apply filtering client-side to hit the limit.
+	fetchMultiplier := 1
+	if flags.easyApply {
+		fetchMultiplier = 3
+	}
+
 	for len(allCards) < flags.limit {
-		fetch := pageSize
-		if remaining := flags.limit - len(allCards); remaining < pageSize {
-			fetch = remaining
+		fetch := pageSize * fetchMultiplier
+		remaining := flags.limit - len(allCards)
+		if fetch > remaining*fetchMultiplier {
+			fetch = remaining * fetchMultiplier
+		}
+		if fetch < 1 {
+			fetch = pageSize
 		}
 
 		params := api.JobSearchParams{
@@ -237,6 +253,7 @@ func runSearch(keywords string, flags searchFlags) error {
 			Sort:        sortCode,
 			PostedRange: postedCode,
 			EasyApply:   flags.easyApply,
+			Remote:      flags.remote,
 			Count:       fetch,
 			Start:       start,
 		}
@@ -246,9 +263,21 @@ func runSearch(keywords string, flags searchFlags) error {
 			return fmt.Errorf("search: %w", err)
 		}
 		total = tot
-		allCards = append(allCards, cards...)
 
-		if len(cards) < fetch || (total > 0 && len(allCards) >= total) {
+		// Client-side Easy Apply filter: only add cards marked as Easy Apply.
+		// This supplements the server-side filter (which LinkedIn may not honour
+		// for all query versions) with a reliable post-processing step.
+		if flags.easyApply {
+			for _, c := range cards {
+				if c.EasyApply {
+					allCards = append(allCards, c)
+				}
+			}
+		} else {
+			allCards = append(allCards, cards...)
+		}
+
+		if len(cards) < fetch || (total > 0 && start+len(cards) >= total) {
 			break
 		}
 		start += fetch

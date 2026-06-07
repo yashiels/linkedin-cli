@@ -231,14 +231,17 @@ func parseGenericURN(urn string) (string, error) {
 }
 
 // SaveJob saves a job to the user's saved jobs collection.
+// Endpoint: POST /voyager/api/voyagerJobsDashSavedJobPosts
+// Body: {"jobPostingUrn": "urn:li:fsd_jobPosting:..."}
 func (c *Client) SaveJob(jobID string) error {
 	urn := normaliseJobURN(jobID)
 	body := map[string]string{
 		"jobPostingUrn": urn,
 	}
+	// Plain POST (no ?action=... query param) — standard Restli collection create.
 	_, err := c.PostJSON(
 		"/voyager/api/voyagerJobsDashSavedJobPosts",
-		map[string]string{"action": "save"},
+		nil,
 		body,
 	)
 	if err != nil {
@@ -248,6 +251,7 @@ func (c *Client) SaveJob(jobID string) error {
 }
 
 // UnsaveJob removes a job from the user's saved jobs collection.
+// Endpoint: DELETE /voyager/api/voyagerJobsDashSavedJobPosts/<encoded-urn>
 func (c *Client) UnsaveJob(jobID string) error {
 	urn := normaliseJobURN(jobID)
 	// LinkedIn uses the URN as path-encoded resource identifier.

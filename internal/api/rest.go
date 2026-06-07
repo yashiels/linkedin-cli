@@ -5,6 +5,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -46,6 +47,18 @@ func (c *Client) Get(path string, params url.Values) (json.RawMessage, error) {
 
 		resp, err := c.http.Do(req)
 		if err != nil {
+			// Unwrap url.Error to check for auth errors from CheckRedirect.
+			// Auth errors (session expiry) must not be retried.
+			var urlErr *url.Error
+			if errors.As(err, &urlErr) {
+				var authErr *types.LnkError
+				if errors.As(urlErr.Err, &authErr) && authErr.Code == types.ExitAuth {
+					return nil, authErr
+				}
+				if !urlErr.Timeout() {
+					return nil, types.NetworkError("HTTP GET failed", err)
+				}
+			}
 			lastErr = types.NetworkError("HTTP GET failed", err)
 			continue
 		}

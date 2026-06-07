@@ -121,7 +121,8 @@ Examples:
 				payload["location"] = flagLocation
 			}
 
-			raw, err := client.Post("/voyager/api/jobs/jobAlerts", payload)
+			// The dash alerts endpoint uses a plain POST (no ?action=... param).
+			raw, err := client.Post("/voyager/api/voyagerJobsDashJobAlerts", payload)
 			if err != nil {
 				return fmt.Errorf("creating alert: %w", err)
 			}
@@ -175,7 +176,7 @@ Example:
 				return err
 			}
 
-			err = client.Delete("/voyager/api/jobs/jobAlerts/" + alertID)
+			err = client.Delete("/voyager/api/voyagerJobsDashJobAlerts/" + alertID)
 			if err != nil {
 				return fmt.Errorf("deleting alert %s: %w", alertID, err)
 			}

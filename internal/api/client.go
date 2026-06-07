@@ -8,11 +8,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/yashiels/linkedin-cli/internal/auth"
@@ -67,7 +69,27 @@ func WithErrWriter(w io.Writer) Option { return func(c *Client) { c.errOut = w }
 // New creates a Client using the provided credentials.
 func New(creds auth.Credentials, opts ...Option) *Client {
 	c := &Client{
-		http:   &http.Client{Timeout: defaultTimeout},
+		http: &http.Client{
+			Timeout: defaultTimeout,
+			// Detect session expiry by catching redirects to login pages or
+			// self-redirect loops. LinkedIn returns a 302 back to the same URL
+			// (with set-cookie: li_at=delete me) when li_at has expired.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if strings.Contains(req.URL.Path, "/login") ||
+					strings.Contains(req.URL.Path, "/authwall") ||
+					strings.Contains(req.URL.Path, "/uas/login") {
+					return types.AuthError("session expired — run 'lnk auth login' to refresh")
+				}
+				// Self-redirect loop: LinkedIn sends 302 → same URL when li_at expires.
+				if len(via) > 0 && req.URL.String() == via[len(via)-1].URL.String() {
+					return types.AuthError("session expired — run 'lnk auth login' to refresh")
+				}
+				if len(via) >= 3 {
+					return types.AuthError("too many redirects — session may be expired, run 'lnk auth login'")
+				}
+				return nil
+			},
+		},
 		creds:  creds,
 		errOut: io.Discard,
 	}
@@ -117,6 +139,18 @@ func (c *Client) QueryGraphQL(queryName, queryID string, variables interface{}) 
 
 		resp, err := c.http.Do(req)
 		if err != nil {
+			// Unwrap url.Error to check for auth errors from CheckRedirect.
+			// Auth errors (session expiry) must not be retried.
+			var urlErr *url.Error
+			if errors.As(err, &urlErr) {
+				var authErr *types.LnkError
+				if errors.As(urlErr.Err, &authErr) && authErr.Code == types.ExitAuth {
+					return nil, authErr
+				}
+				if !urlErr.Timeout() {
+					return nil, types.NetworkError("GraphQL request failed", err)
+				}
+			}
 			lastErr = types.NetworkError("HTTP request failed", err)
 			continue
 		}

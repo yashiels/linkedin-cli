@@ -63,42 +63,31 @@ func (c *Client) FetchFeed(count, start int) ([]types.JobCard, int, error) {
 }
 
 // buildSearchVars constructs the RestLi-encodable variable map for a job search.
+//
+// Discovery: the LinkedIn Voyager web API (voyagerJobsDashJobCards) validates
+// `selectedFilters` as an input object type with NO exposed fields — any named
+// field inside selectedFilters is rejected with a ValidationError. The correct
+// encoding is to pass filters as TOP-LEVEL variables alongside count/start/query.
+//
+// Confirmed working top-level filter variable names (from live API testing):
+//
+//	applyWithLinkedin — Easy Apply; values: List("true")
+//	experience        — Experience level codes; e.g. List("1","2")
+//	jobType           — Job type codes; e.g. List("F","P")
+//	timePostedRange   — Time range; e.g. List("r86400") = 24h
+//	workplaceType     — Workplace; "1"=onsite, "2"=remote, "3"=hybrid
+//	sortBy            — Sort order; List("R")=recent, List("DD")=relevant
 func buildSearchVars(p JobSearchParams) map[string]interface{} {
-	// Build selected filters. The web/browser API uses a different schema
-	// than the mobile app — only include filters that are actually set.
-	filters := map[string]interface{}{}
-	if p.EasyApply {
-		filters["applyWithLinkedin"] = []string{"true"}
-	}
-	if len(p.JobTypes) > 0 {
-		filters["jobType"] = p.JobTypes
-	}
-	if len(p.Experience) > 0 {
-		filters["experience"] = p.Experience
-	}
-	if p.PostedRange != "" {
-		filters["timePostedRange"] = []string{p.PostedRange}
-	}
-
-	// Build location union.
-	var locationUnion map[string]interface{}
-	if p.GeoURN != "" {
-		locationUnion = map[string]interface{}{
-			"geoUrn": p.GeoURN,
-		}
-	}
-
-	// Build query inner.
+	// Build the query inner object (no selectedFilters — filters go top-level).
 	queryInner := map[string]interface{}{
 		"keywords":               p.Keywords,
 		"origin":                 "JOB_SEARCH_PAGE_SEARCH_BUTTON",
 		"spellCorrectionEnabled": true,
 	}
-	if len(filters) > 0 {
-		queryInner["selectedFilters"] = filters
-	}
-	if locationUnion != nil {
-		queryInner["locationUnion"] = locationUnion
+	if p.GeoURN != "" {
+		queryInner["locationUnion"] = map[string]interface{}{
+			"geoUrn": p.GeoURN,
+		}
 	}
 
 	count := p.Count
@@ -106,12 +95,36 @@ func buildSearchVars(p JobSearchParams) map[string]interface{} {
 		count = 10
 	}
 
-	return map[string]interface{}{
+	vars := map[string]interface{}{
 		"query":           queryInner,
 		"includeJobState": true,
 		"count":           count,
 		"start":           p.Start,
 	}
+
+	// Filters are top-level variables, NOT nested in selectedFilters.
+	if p.EasyApply {
+		vars["applyWithLinkedin"] = []string{"true"}
+	}
+	if len(p.JobTypes) > 0 {
+		vars["jobType"] = p.JobTypes
+	}
+	if len(p.Experience) > 0 {
+		vars["experience"] = p.Experience
+	}
+	if p.PostedRange != "" {
+		vars["timePostedRange"] = []string{p.PostedRange}
+	}
+	// Remote jobs: LinkedIn workplace type "2" = REMOTE.
+	if p.Remote {
+		vars["workplaceType"] = []string{"2"}
+	}
+	// Sort: "R" = most recent, "DD" = most relevant (LinkedIn default).
+	if p.Sort == "R" {
+		vars["sortBy"] = []string{"R"}
+	}
+
+	return vars
 }
 
 // --- Response parsing ---

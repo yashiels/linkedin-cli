@@ -15,9 +15,23 @@ type Profile struct {
 	// Connections is the display-formatted connection count, e.g. "500+".
 	Connections string `json:"connections,omitempty"`
 
-	Experience []Experience `json:"experience"`
-	Education  []Education  `json:"education"`
-	Skills     []string     `json:"skills,omitempty"`
+	Experience     []Experience    `json:"experience"`
+	Education      []Education     `json:"education"`
+	Skills         []string        `json:"skills,omitempty"`
+	Certifications []Certification `json:"certifications,omitempty"`
+	Honors         []Honor         `json:"honors,omitempty"`
+}
+
+// Certification is a professional certification or course completion.
+type Certification struct {
+	Name      string `json:"name"`
+	Authority string `json:"authority,omitempty"`
+}
+
+// Honor is an award or honor listed on a profile.
+type Honor struct {
+	Title  string `json:"title"`
+	Issuer string `json:"issuer,omitempty"`
 }
 
 // FullName returns the member's formatted full name.

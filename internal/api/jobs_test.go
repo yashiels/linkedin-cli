@@ -48,6 +48,9 @@ func TestBuildSearchVars_MinimalParams(t *testing.T) {
 }
 
 func TestBuildSearchVars_WithAllFilters(t *testing.T) {
+	// NOTE: Filters go as TOP-LEVEL variables, not inside query.selectedFilters.
+	// The LinkedIn Voyager web API rejects all field names inside selectedFilters
+	// for the voyagerJobsDashJobCards query. Confirmed via live API testing.
 	p := JobSearchParams{
 		Keywords:    "backend developer",
 		GeoURN:      "urn:li:fsd_geo:105013608",
@@ -56,31 +59,47 @@ func TestBuildSearchVars_WithAllFilters(t *testing.T) {
 		Sort:        "R",
 		PostedRange: "r86400",
 		EasyApply:   true,
+		Remote:      true,
 		Count:       25,
 		Start:       10,
 	}
 	vars := buildSearchVars(p)
 
-	q, _ := vars["query"].(map[string]interface{})
-	filters, _ := q["selectedFilters"].(map[string]interface{})
-
-	if _, hasEasy := filters["applyWithLinkedin"]; !hasEasy {
-		t.Error("expected applyWithLinkedin filter when EasyApply is true")
+	// Filters must be at the top level.
+	if _, hasEasy := vars["applyWithLinkedin"]; !hasEasy {
+		t.Error("expected applyWithLinkedin at top-level vars when EasyApply is true")
 	}
-	if _, hasType := filters["jobType"]; !hasType {
-		t.Error("expected jobType filter")
+	if _, hasType := vars["jobType"]; !hasType {
+		t.Error("expected jobType at top-level vars")
 	}
-	if _, hasExp := filters["experience"]; !hasExp {
-		t.Error("expected experience filter")
+	if _, hasExp := vars["experience"]; !hasExp {
+		t.Error("expected experience at top-level vars")
 	}
-	if _, hasPosted := filters["timePostedRange"]; !hasPosted {
-		t.Error("expected timePostedRange filter")
+	if _, hasPosted := vars["timePostedRange"]; !hasPosted {
+		t.Error("expected timePostedRange at top-level vars")
+	}
+	if _, hasRemote := vars["workplaceType"]; !hasRemote {
+		t.Error("expected workplaceType at top-level vars when Remote is true")
+	}
+	if _, hasSort := vars["sortBy"]; !hasSort {
+		t.Error("expected sortBy at top-level vars when Sort is R")
 	}
 	if vars["count"] != 25 {
 		t.Errorf("expected count=25, got %v", vars["count"])
 	}
 	if vars["start"] != 10 {
 		t.Errorf("expected start=10, got %v", vars["start"])
+	}
+
+	q, ok := vars["query"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected query map")
+	}
+	// query must NOT have selectedFilters with any filter fields (they'd be rejected).
+	if sf, hasSF := q["selectedFilters"]; hasSF {
+		if sfm, ok := sf.(map[string]interface{}); ok && len(sfm) > 0 {
+			t.Error("selectedFilters inside query should be empty or absent; LinkedIn rejects named fields")
+		}
 	}
 
 	locUnion, ok := q["locationUnion"].(map[string]interface{})

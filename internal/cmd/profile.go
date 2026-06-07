@@ -124,6 +124,22 @@ func getOwnProfileMeta(client *api.Client) (*ownProfileMeta, error) {
 // miniProfileRaw is optional — the raw miniProfile entity from /me; used as
 // a base when no REST profile data is available.
 func fetchProfile(client *api.Client, vanityName, profileURN string, miniProfileRaw json.RawMessage) (*types.Profile, error) {
+	// 1. Try the dash profiles endpoint first — it is the current working
+	//    endpoint and returns a complete profile including education, experience,
+	//    skills, certifications, and honors in a single request.
+	//    The old /voyager/api/identity/profiles/<vanityName> is deprecated (410).
+	dashRaw, dashErr := client.GetProfileByIdentity(vanityName)
+	if dashErr == nil {
+		p, parseErr := parseDashProfile(dashRaw)
+		if parseErr == nil && (p.FirstName != "" || p.LastName != "") {
+			if p.VanityName == "" {
+				p.VanityName = vanityName
+			}
+			return p, nil
+		}
+	}
+
+	// 2. Fall back to the legacy REST + GraphQL + profileView chain.
 	p := &types.Profile{VanityName: vanityName}
 
 	// Seed basic fields from miniProfile if we already have it (own profile case).
@@ -131,7 +147,6 @@ func fetchProfile(client *api.Client, vanityName, profileURN string, miniProfile
 		parseMiniProfile(p, miniProfileRaw)
 	}
 
-	// 1. Fetch basic profile info via REST.
 	basicRaw, err := client.Get("/voyager/api/identity/profiles/"+url.PathEscape(vanityName), nil)
 	if err == nil {
 		parseBasicProfile(p, basicRaw)
@@ -141,31 +156,156 @@ func fetchProfile(client *api.Client, vanityName, profileURN string, miniProfile
 		if gerr == nil {
 			parseBasicProfile(p, graphRaw)
 		}
-		// If both fail and we had miniProfile data, continue with what we have.
+		// If all fetches failed, report the dash error (most informative).
 		if p.FirstName == "" && p.LastName == "" && miniProfileRaw == nil {
+			if dashErr != nil {
+				return nil, fmt.Errorf("fetching profile for %q: %w", vanityName, dashErr)
+			}
 			return nil, fmt.Errorf("fetching profile for %q: %w", vanityName, err)
 		}
 	}
 
-	// 2. Fetch experience and education from profileView.
-	viewRaw, err := client.Get(
+	// 3. Fetch experience and education from profileView.
+	viewRaw, viewErr := client.Get(
 		"/voyager/api/identity/profiles/"+url.PathEscape(vanityName)+"/profileView",
 		nil,
 	)
-	if err == nil {
+	if viewErr == nil {
 		parseProfileView(p, viewRaw)
 	}
 
-	// 3. Fetch connection count.
-	netRaw, err := client.Get(
+	// 4. Fetch connection count.
+	netRaw, netErr := client.Get(
 		"/voyager/api/identity/profiles/"+url.PathEscape(vanityName)+"/networkinfo",
 		nil,
 	)
-	if err == nil {
+	if netErr == nil {
 		parseNetworkInfo(p, netRaw)
 	}
 
 	return p, nil
+}
+
+// parseDashProfile converts the dash profiles endpoint response into a Profile.
+//
+// The dash profiles endpoint returns:
+//
+//	{"elements": [{
+//	  "firstName": "...", "lastName": "...", "headline": "...", "summary": "...",
+//	  "profileEducations":       {"elements": [{"schoolName": "...", "degreeName": "...", "fieldOfStudy": "...", "timePeriod": {...}}]},
+//	  "profilePositionGroups":   {"elements": [{"profilePositionInPositionGroup": {"elements": [{"title": "...", "companyName": "...", "locationName": "...", "description": "...", "timePeriod": {...}}]}}]},
+//	  "profileSkills":           {"elements": [{"name": "..."}]},
+//	  "profileCertifications":   {"elements": [{"name": "...", "authority": "..."}]},
+//	  "profileHonors":           {"elements": [{"title": "...", "issuer": "..."}]}
+//	}]}
+func parseDashProfile(raw json.RawMessage) (*types.Profile, error) {
+	if raw == nil {
+		return nil, fmt.Errorf("empty dash profile response")
+	}
+
+	// Top-level {"elements": [...]}
+	elems := jelems(raw)
+	if len(elems) == 0 {
+		return nil, fmt.Errorf("no elements in dash profile response")
+	}
+	elem := elems[0]
+
+	p := &types.Profile{}
+	p.FirstName = jstr(jget(elem, "firstName"))
+	p.LastName = jstr(jget(elem, "lastName"))
+	p.Headline = jstr(jget(elem, "headline"))
+	p.About = jstr(jget(elem, "summary"))
+	p.URN = firstNonEmpty(jstr(jget(elem, "entityUrn")), jstr(jget(elem, "dashEntityUrn")))
+	p.Location = firstNonEmpty(
+		jstr(jget(elem, "locationName")),
+		jstr(jget(elem, "geoCountryName")),
+	)
+	if id := jstr(jget(elem, "publicIdentifier")); id != "" {
+		p.VanityName = id
+	}
+
+	// Education: profileEducations.elements[]
+	for _, edu := range jelems(jget(elem, "profileEducations")) {
+		e := types.Education{
+			School:       jstr(jget(edu, "schoolName")),
+			Degree:       jstr(jget(edu, "degreeName")),
+			FieldOfStudy: jstr(jget(edu, "fieldOfStudy")),
+		}
+		tp := jget(edu, "timePeriod")
+		if tp != nil {
+			e.StartDate = formatYear(jget(tp, "startDate"))
+			e.EndDate = parseDashEndDate(jget(tp, "endDate"))
+		}
+		if e.School != "" || e.Degree != "" {
+			p.Education = append(p.Education, e)
+		}
+	}
+
+	// Experience: profilePositionGroups.elements[].profilePositionInPositionGroup.elements[]
+	for _, group := range jelems(jget(elem, "profilePositionGroups")) {
+		for _, pos := range jelems(jget(group, "profilePositionInPositionGroup")) {
+			exp := types.Experience{
+				Title:       jstr(jget(pos, "title")),
+				Company:     firstNonEmpty(jstr(jget(pos, "companyName")), jstr(jget(pos, "company", "name"))),
+				Location:    jstr(jget(pos, "locationName")),
+				Description: jstr(jget(pos, "description")),
+			}
+			tp := jget(pos, "timePeriod")
+			if tp != nil {
+				exp.StartDate = formatYear(jget(tp, "startDate"))
+				exp.EndDate = parseDashEndDate(jget(tp, "endDate"))
+			} else {
+				exp.EndDate = "Present"
+			}
+			if exp.Title != "" || exp.Company != "" {
+				p.Experience = append(p.Experience, exp)
+			}
+		}
+	}
+
+	// Skills: profileSkills.elements[]
+	for _, skill := range jelems(jget(elem, "profileSkills")) {
+		if name := jstr(jget(skill, "name")); name != "" {
+			p.Skills = append(p.Skills, name)
+		}
+	}
+
+	// Certifications: profileCertifications.elements[]
+	for _, cert := range jelems(jget(elem, "profileCertifications")) {
+		c := types.Certification{
+			Name:      jstr(jget(cert, "name")),
+			Authority: jstr(jget(cert, "authority")),
+		}
+		if c.Name != "" {
+			p.Certifications = append(p.Certifications, c)
+		}
+	}
+
+	// Honors: profileHonors.elements[]
+	for _, hon := range jelems(jget(elem, "profileHonors")) {
+		h := types.Honor{
+			Title:  jstr(jget(hon, "title")),
+			Issuer: jstr(jget(hon, "issuer")),
+		}
+		if h.Title != "" {
+			p.Honors = append(p.Honors, h)
+		}
+	}
+
+	return p, nil
+}
+
+// parseDashEndDate converts a dash profile timePeriod endDate to a display string.
+// Returns "Present" when endDate is absent or null.
+func parseDashEndDate(raw json.RawMessage) string {
+	if raw == nil || string(raw) == "null" {
+		return "Present"
+	}
+	y := formatYear(raw)
+	if y == "" {
+		return "Present"
+	}
+	return y
 }
 
 // fetchProfileGraphQL uses the Voyager GraphQL API as a fallback.
@@ -395,11 +535,14 @@ func printProfile(cmd *cobra.Command, p *types.Profile) {
 		for _, e := range p.Experience {
 			line := "  • "
 			if e.Title != "" && e.Company != "" {
-				line += e.Title + " at " + e.Company
+				line += e.Title + " — " + e.Company
 			} else if e.Title != "" {
 				line += e.Title
 			} else {
 				line += e.Company
+			}
+			if e.Location != "" {
+				line += "\n    " + e.Location
 			}
 			if dates := e.DisplayDates(); dates != "" {
 				line += " (" + dates + ")"
@@ -414,15 +557,50 @@ func printProfile(cmd *cobra.Command, p *types.Profile) {
 		fmt.Fprintln(w, "Education:")
 		for _, e := range p.Education {
 			line := "  • "
-			if deg := e.DisplayDegree(); deg != "" && e.School != "" {
-				line += deg + ", " + e.School
+			deg := e.DisplayDegree()
+			if deg != "" {
+				line += deg
+				if e.School != "" {
+					line += "\n    " + e.School
+				}
 			} else if e.School != "" {
 				line += e.School
-			} else {
-				line += e.DisplayDegree()
 			}
 			if dates := e.DisplayDates(); dates != "" {
 				line += " (" + dates + ")"
+			}
+			fmt.Fprintln(w, line)
+		}
+	}
+
+	// Skills.
+	if len(p.Skills) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Skills:")
+		fmt.Fprintln(w, "  "+strings.Join(p.Skills, ", "))
+	}
+
+	// Certifications.
+	if len(p.Certifications) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Certifications:")
+		for _, cert := range p.Certifications {
+			line := "  • " + cert.Name
+			if cert.Authority != "" {
+				line += " — " + cert.Authority
+			}
+			fmt.Fprintln(w, line)
+		}
+	}
+
+	// Honors.
+	if len(p.Honors) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Honors:")
+		for _, h := range p.Honors {
+			line := "  • " + h.Title
+			if h.Issuer != "" {
+				line += " — " + h.Issuer
 			}
 			fmt.Fprintln(w, line)
 		}
