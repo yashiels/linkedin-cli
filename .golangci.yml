@@ -1,0 +1,22 @@
+version: "2"
+run:
+  timeout: 5m
+  tests: true
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - errorlint
+    - bodyclose
+    - misspell
+    - unconvert
+    - gocyclo
+  settings:
+    gocyclo:
+      min-complexity: 30
+formatters:
+  enable:
+    - gofumpt

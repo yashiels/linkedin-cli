@@ -1,9 +1,9 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
+LDFLAGS  := -trimpath -ldflags "-s -w -X main.version=$(VERSION)"
 BINARY   := lnk
 CMD      := ./cmd/lnk/
 
-.PHONY: build install test clean fmt vet lint
+.PHONY: build install test clean fmt vet lint ci
 
 ## build: Compile lnk into the current directory.
 build:
@@ -15,7 +15,7 @@ install:
 
 ## test: Run the full test suite.
 test:
-	go test ./...
+	go test -race ./...
 
 ## vet: Run go vet across all packages.
 vet:
@@ -28,6 +28,11 @@ fmt:
 ## lint: Run golangci-lint if available, otherwise go vet.
 lint:
 	@which golangci-lint > /dev/null 2>&1 && golangci-lint run ./... || go vet ./...
+
+## ci: Run vet, fmt check, and tests (mirrors CI workflow).
+ci: vet
+	@test -z "$$(gofmt -l .)" || (echo "gofmt: unformatted files:" && gofmt -l . && exit 1)
+	go test -race ./...
 
 ## clean: Remove the compiled binary.
 clean:

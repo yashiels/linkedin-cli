@@ -1,79 +1,39 @@
-# lnk — LinkedIn CLI
+# 🔗 lnk — LinkedIn from the terminal
 
-A fast, unofficial command-line interface for LinkedIn, built on the internal
-Voyager API reverse-engineered from the Android APK.
+![lnk banner](docs/assets/banner.png)
 
-> **Disclaimer:** This is an independent, unofficial tool and is not affiliated
-> with, endorsed by, or supported by LinkedIn Corporation. It may break at any
-> time if LinkedIn changes their internal API. Use responsibly and at your own
-> risk.
+Search jobs, view profiles, apply — all from your shell. Built on LinkedIn's Voyager API, reverse-engineered from the Android APK.
 
----
-
-## Table of Contents
-
-- [Install](#install)
-- [Quick Start](#quick-start)
-- [Commands](#commands)
-  - [auth](#auth)
-  - [profile](#profile)
-  - [search](#search)
-  - [alerts](#alerts)
-  - [status](#status)
-  - [completion](#completion)
-- [Configuration](#configuration)
-- [Environment Variables](#environment-variables)
-- [How It Works](#how-it-works)
-- [License](#license)
-
----
+![lnk demo](docs/assets/hero.png)
 
 ## Install
 
-### From source (requires Go 1.21+)
+**Homebrew (recommended):**
+
+```bash
+brew install yashiels/tap/lnk
+```
+
+**Go install:**
 
 ```bash
 go install github.com/yashiels/linkedin-cli/cmd/lnk@latest
 ```
 
-### Build locally
+**Pre-built binaries:**
+
+Download from the [Releases](https://github.com/yashiels/linkedin-cli/releases) page (macOS arm64/amd64, Linux arm64/amd64).
+
+## Quickstart
 
 ```bash
-git clone https://github.com/yashiels/linkedin-cli.git
-cd linkedin-cli
-make install
+lnk auth login                    # paste your li_at cookie
+lnk search "software engineer" --location "Cape Town" --easy-apply
+lnk job 4414623196                # view full job details
+lnk apply 4414623196 --dry-run    # preview Easy Apply
+lnk profile taneekamaharaj        # view any profile
+lnk feed --limit 10               # recommended jobs
 ```
-
-### Pre-built binaries
-
-Download from the [Releases](https://github.com/yashiels/linkedin-cli/releases) page.
-
----
-
-## Quick Start
-
-1. **Get your session cookies** from the browser:
-   - Open [LinkedIn](https://www.linkedin.com) and log in.
-   - Open DevTools → Application → Cookies → `linkedin.com`.
-   - Copy the values for `li_at` and `JSESSIONID`.
-
-2. **Log in:**
-   ```bash
-   lnk auth login
-   ```
-   Paste each cookie value when prompted.
-
-3. **Verify your setup:**
-   ```bash
-   lnk status
-   ```
-
-4. **Search for jobs:**
-   ```bash
-   lnk search "software engineer" --location "Cape Town"
-   ```
-
----
 
 ## Commands
 
@@ -81,20 +41,134 @@ Download from the [Releases](https://github.com/yashiels/linkedin-cli/releases) 
 
 Manage LinkedIn session credentials.
 
-```bash
-# Store your li_at and JSESSIONID cookies
-lnk auth login
-
-# Check current auth status
-lnk auth status
-
-# Remove stored credentials
-lnk auth logout
+```
+lnk auth login     Store li_at and JSESSIONID cookies (interactive prompt)
+lnk auth status    Show current authentication state
+lnk auth logout    Remove stored credentials
 ```
 
-Credentials are stored in `~/.config/lnk/credentials.json` with `0600`
-permissions. You can also supply them via environment variables (see
-[Environment Variables](#environment-variables)).
+Credentials are stored in `~/.config/lnk/credentials.json` with `0600` permissions.
+You can also supply them via environment variables — see [Configuration](#configuration).
+
+---
+
+### search
+
+Search job postings with powerful filters.
+
+```
+lnk search <keywords> [flags]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--location` | `-l` | | Location name or geo URN |
+| `--type` | `-t` | | Comma-separated job types: `full-time`, `part-time`, `contract`, `temporary`, `volunteer`, `internship` |
+| `--experience` | `-e` | | Comma-separated levels: `entry`, `associate`, `mid-senior`, `director`, `executive` |
+| `--easy-apply` | | false | Filter for Easy Apply jobs only |
+| `--remote` | | false | Filter for remote jobs |
+| `--sort` | | `relevant` | Sort order: `recent` or `relevant` |
+| `--limit` | `-n` | `25` | Maximum results to return |
+| `--posted` | | | Posted within: `24h`, `week`, `month` |
+
+**Examples:**
+
+```bash
+lnk search "backend engineer" --location "London" --type full-time --easy-apply
+lnk search "product manager" --remote --posted week --sort recent
+lnk search "data scientist" --experience entry,mid-senior --limit 50 --json
+```
+
+---
+
+### job
+
+View full details for a specific job posting.
+
+```
+lnk job <job-id> [flags]
+```
+
+| Flag | Description |
+|---|---|
+| `--open` | Open the job URL in your default browser |
+
+**Example:**
+
+```bash
+lnk job 4414623196
+lnk job 4414623196 --open
+lnk job 4414623196 --json
+```
+
+---
+
+### apply
+
+Apply to a job via Easy Apply.
+
+```
+lnk apply <job-id> [flags]
+```
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Show what would be submitted without actually applying |
+| `--confirm` | Skip the confirmation prompt and apply immediately |
+
+**Examples:**
+
+```bash
+lnk apply 4414623196 --dry-run    # preview the submission
+lnk apply 4414623196              # apply with confirmation prompt
+lnk apply 4414623196 --confirm    # apply without prompt
+```
+
+---
+
+### saved
+
+Manage your saved jobs.
+
+```
+lnk saved list [flags]
+lnk saved add <job-id>
+lnk saved remove <job-id>
+```
+
+| Flag (list) | Default | Description |
+|---|---|---|
+| `--limit` | `25` | Maximum results to return |
+
+**Examples:**
+
+```bash
+lnk saved list
+lnk saved list --limit 50 --json
+lnk saved add 4414623196
+lnk saved remove 4414623196
+```
+
+---
+
+### feed
+
+Browse your personalised job recommendations.
+
+```
+lnk feed [flags]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--limit` | `-n` | `25` | Maximum results to return |
+
+**Example:**
+
+```bash
+lnk feed
+lnk feed --limit 10 --json
+```
 
 ---
 
@@ -102,52 +176,19 @@ permissions. You can also supply them via environment variables (see
 
 View a LinkedIn member profile.
 
-```bash
-# View your own profile
-lnk profile
-
-# View another member's profile (use their LinkedIn URL slug)
-lnk profile satyanadella
-lnk profile yashielsookdeo
-
-# Output as JSON
-lnk profile --json
-lnk profile satyanadella --json
+```
+lnk profile [username] [flags]
 ```
 
-**Example output:**
+Omit `username` to view your own profile. The username is the slug from the LinkedIn
+profile URL: `https://www.linkedin.com/in/<username>`
 
-```
-Yashiel Sookdeo
-Software Engineer at Skyner
-Cape Town Metropolitan Area
-
-About:
-  Building software systems and developer tools.
-
-Experience:
-  • Software Engineer at Skyner (2023 - Present)
-  • Junior Developer at Acme Corp (2021 - 2023)
-
-Education:
-  • BSc Computer Science, UCT (2018 - 2021)
-
-500+ connections
-```
-
-The username is the slug from the LinkedIn profile URL:
-`https://www.linkedin.com/in/<username>`
-
----
-
-### search
-
-Search for job postings.
+**Examples:**
 
 ```bash
-lnk search "software engineer" --location "Cape Town"
-lnk search "product manager" --location "Remote" --limit 10
-lnk search "backend engineer" --location "London" --json
+lnk profile                        # your own profile
+lnk profile satyanadella           # another member's profile
+lnk profile yashielsookdeo --json  # output as JSON
 ```
 
 ---
@@ -156,34 +197,26 @@ lnk search "backend engineer" --location "London" --json
 
 Manage LinkedIn job alert subscriptions.
 
-```bash
-# List all active alerts
+```
 lnk alerts list
+lnk alerts create [flags]
+lnk alerts delete <alert-id>
+```
 
-# Create a new alert
+| Flag (create) | Default | Description |
+|---|---|---|
+| `--keywords` | required | Job search keywords |
+| `--location` | | Location filter (city, country, or Remote) |
+| `--frequency` | `daily` | Email frequency: `daily` or `weekly` |
+
+**Examples:**
+
+```bash
+lnk alerts list
 lnk alerts create --keywords "software engineer" --location "Cape Town"
 lnk alerts create --keywords "product manager" --location "Remote" --frequency weekly
-
-# Delete an alert by ID (find IDs with 'lnk alerts list')
-lnk alerts delete 123456789
+lnk alerts delete 111222333
 ```
-
-**Example `lnk alerts list` output:**
-
-```
-ALERT ID      KEYWORDS            LOCATION       FREQUENCY  CREATED
-──────────    ──────────────────  ─────────────  ─────────  ──────────
-111222333     software engineer   Cape Town      DAILY      2024-01-15
-444555666     product manager     Remote         WEEKLY     2024-03-01
-```
-
-**Flags for `lnk alerts create`:**
-
-| Flag          | Default  | Description                              |
-|---------------|----------|------------------------------------------|
-| `--keywords`  | required | Job search keywords                      |
-| `--location`  | (none)   | Location filter (city, country, Remote)  |
-| `--frequency` | `daily`  | Email frequency: `daily` or `weekly`     |
 
 ---
 
@@ -191,38 +224,30 @@ ALERT ID      KEYWORDS            LOCATION       FREQUENCY  CREATED
 
 Show authentication state, configuration, and API connectivity.
 
+```
+lnk status [flags]
+```
+
 ```bash
 lnk status
 lnk status --json
-```
-
-**Example output:**
-
-```
-✓ Logged in as Yashiel Sookdeo
-  Session: active
-  Config:  ~/.config/lnk/config.toml
-  API:     connected (prod-ltx1)
 ```
 
 ---
 
 ### completion
 
-Generate a shell completion script.
+Generate shell completion scripts.
 
 ```bash
 # Bash — source immediately
 source <(lnk completion bash)
 
 # Bash — persist across sessions
-lnk completion bash > /etc/bash_completion.d/lnk
-# or (user-local):
 lnk completion bash > ~/.local/share/bash-completion/completions/lnk
 
 # Zsh
 lnk completion zsh > "${fpath[1]}/_lnk"
-# Reload shell: exec zsh
 
 # Fish
 lnk completion fish > ~/.config/fish/completions/lnk.fish
@@ -231,31 +256,26 @@ lnk completion fish > ~/.config/fish/completions/lnk.fish
 lnk completion powershell | Out-String | Invoke-Expression
 ```
 
-After installation, `Tab` completion will work for all `lnk` subcommands
-and flags.
-
 ---
 
 ## Global Flags
 
 These flags work with every command:
 
-| Flag          | Short | Description                                        |
-|---------------|-------|----------------------------------------------------|
-| `--json`      |       | Output as JSON (machine-readable)                  |
-| `--plain`     |       | Output as tab-separated text (pipe-friendly)       |
-| `--no-color`  |       | Disable ANSI colour codes                          |
-| `--quiet`     | `-q`  | Suppress informational messages                    |
-| `--verbose`   |       | Log HTTP requests to stderr                        |
-| `--debug`     |       | Log full HTTP request/response bodies to stderr    |
-| `--no-input`  |       | Fail instead of prompting for input                |
-| `--config`    |       | Path to config file (overrides default location)   |
-
----
+| Flag | Short | Description |
+|---|---|---|
+| `--json` | | Output as JSON (machine-readable) |
+| `--plain` | | Output as tab-separated text (pipe-friendly) |
+| `--no-color` | | Disable ANSI colour codes |
+| `--quiet` | `-q` | Suppress informational messages |
+| `--verbose` | | Log HTTP requests to stderr |
+| `--debug` | | Log full HTTP request/response bodies to stderr |
+| `--no-input` | | Fail instead of prompting for input |
+| `--config` | | Path to config file (overrides default) |
 
 ## Configuration
 
-`lnk` reads configuration from `~/.config/lnk/config.toml`:
+**Config file:** `~/.config/lnk/config.toml`
 
 ```toml
 [defaults]
@@ -267,45 +287,39 @@ limit    = 25
 color = true
 ```
 
-Override the config file path with the `LNK_CONFIG` environment variable or
-the `--config` flag.
+**Credentials file:** `~/.config/lnk/credentials.json`
 
----
+**Environment variables:**
 
-## Environment Variables
+| Variable | Description |
+|---|---|
+| `LNK_LI_AT` | LinkedIn `li_at` session cookie (overrides stored credentials) |
+| `LNK_CONFIG` | Path to config file |
+| `LNK_DEBUG` | Set to `1` to enable debug HTTP logging |
+| `NO_COLOR` | Disable ANSI colour output ([no-color.org](https://no-color.org)) |
 
-| Variable         | Description                                              |
-|------------------|----------------------------------------------------------|
-| `LNK_LI_AT`      | LinkedIn `li_at` session cookie (overrides stored cred)  |
-| `LNK_CSRF_TOKEN` | LinkedIn CSRF token from `JSESSIONID` cookie             |
-| `LNK_CONFIG`     | Path to config file                                      |
-| `NO_COLOR`       | Disable ANSI colour (standard: https://no-color.org)     |
-
-Setting `LNK_LI_AT` and `LNK_CSRF_TOKEN` lets you use `lnk` in CI/CD
-pipelines without writing a credentials file to disk.
-
----
+Setting `LNK_LI_AT` lets you use `lnk` in CI/CD pipelines without writing
+credentials to disk.
 
 ## How It Works
 
-LinkedIn does not provide an official public API for the features `lnk` targets.
-This tool is built by reverse-engineering the LinkedIn Android application
-(APK v4.1.1209) using standard decompilation tools.
+Reverse-engineered from the LinkedIn Android APK v4.1.1209 using standard
+decompilation tools. Requests go to `https://www.linkedin.com/voyager/api/graphql`
+and REST sub-paths under `/voyager/api/` using the same HTTP headers the official
+Android client sends. 481 API queries extracted. Variable encoding uses the RestLi
+protocol (`internal/restli`). Auth via session cookies (`li_at` + `JSESSIONID`).
 
-All requests hit `https://www.linkedin.com/voyager/api/graphql` (and a handful
-of REST sub-paths under `/voyager/api/`) with the same HTTP headers that the
-official Android client sends. The query IDs and variable encoding format
-(RestLi) were extracted directly from the APK's request-building code.
+Because this relies on LinkedIn's internal API:
 
-Because this relies on LinkedIn's *internal* API:
+- **It may break** if LinkedIn updates or deprecates endpoints.
+- **Rate-limiting is possible** — the client backs off on HTTP 429 responses.
+- **LinkedIn's Terms of Service** may prohibit automated access.
 
-- **It may break at any time** if LinkedIn updates or deprecates endpoints.
-- **Rate-limiting is possible** — the client applies exponential back-off on
-  HTTP 429 responses.
-- **LinkedIn's Terms of Service** may prohibit automated access. Review them
-  before use and use the tool responsibly.
+## Disclaimer
 
----
+Unofficial tool. Not affiliated with, endorsed by, or supported by LinkedIn
+Corporation. Use at your own risk. May break if LinkedIn updates their API.
+For personal and research use only.
 
 ## License
 

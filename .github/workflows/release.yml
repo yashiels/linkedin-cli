@@ -1,0 +1,82 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          ref="${{ inputs.tag || github.ref_name }}"
+          version="${ref#v}"
+          target="${GOOS}_${GOARCH}"
+          out="dist/lnk_${version}_${target}"
+          mkdir -p "$out"
+          go build -trimpath -ldflags="-s -w -X main.version=${version}" -o "$out/lnk" ./cmd/lnk
+          cp README.md LICENSE "$out/"
+          tar -C "$out" -czf "dist/lnk_${version}_${target}.tar.gz" lnk README.md LICENSE
+          sha256sum "dist/lnk_${version}_${target}.tar.gz" > "dist/lnk_${version}_${target}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: lnk-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.tar.gz*
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+      - name: Flatten
+        run: mkdir -p dist && find artifacts -type f -maxdepth 3 -exec cp {} dist/ \;
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: dist/*
+  update-tap:
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Dispatch tap update
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          gh workflow run update-formula.yml \
+            --repo yashiels/homebrew-tap \
+            -f formula=lnk \
+            -f tag="$tag" \
+            -f repository=yashiels/linkedin-cli \
+            -f artifact_template='lnk_{version}_{target}.tar.gz'
