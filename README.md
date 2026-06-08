@@ -31,7 +31,7 @@ lnk auth login                    # paste your li_at cookie
 lnk search "software engineer" --location "Cape Town" --easy-apply
 lnk job 4414623196                # view full job details
 lnk apply 4414623196 --dry-run    # preview Easy Apply
-lnk profile taneekamaharaj        # view any profile
+lnk profile johndoe               # view any profile
 lnk feed --limit 10               # recommended jobs
 ```
 
