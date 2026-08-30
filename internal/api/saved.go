@@ -42,128 +42,71 @@ func (c *Client) GetSavedJobs(count int) ([]types.JobCard, error) {
 }
 
 // parseSavedJobCards extracts job cards from the saved jobs API response.
+//
+// The saved-jobs query (JobCardsByJobCollections) returns the same Voyager v2
+// element shape as job search — elements arrive as
+// {jobCard: {jobPostingCard: {...}}} — so it reuses the well-tested job-search
+// extraction pipeline (resolveJobCard) rather than duplicating traversal logic.
+// The only differences are the collection key under data and marking each card
+// as saved.
 func parseSavedJobCards(raw json.RawMessage) ([]types.JobCard, error) {
-	var envelope map[string]interface{}
-	if err := json.Unmarshal(raw, &envelope); err != nil {
+	var resp voyagerResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("saved jobs: cannot decode response: %w", err)
 	}
 
-	// Navigate to the elements array.
-	data := nav(envelope, "data")
-	var elements []interface{}
+	entityMap := buildEntityMap(resp.Included)
 
-	if dm, ok := data.(map[string]interface{}); ok {
-		for _, v := range dm {
-			if sub, ok := v.(map[string]interface{}); ok {
-				if elems, ok := sub["elements"]; ok {
-					if a := arr(elems); len(a) > 0 {
-						elements = a
-						break
-					}
-				}
-			}
-		}
-	}
-
+	elements := findCollectionElements(resp.Data)
 	if len(elements) == 0 {
 		return []types.JobCard{}, nil
 	}
 
 	cards := make([]types.JobCard, 0, len(elements))
 	for _, elem := range elements {
-		card := extractJobCard(elem, true)
-		if card != nil {
-			cards = append(cards, *card)
+		card, err := resolveJobCard(elem, entityMap)
+		if err != nil {
+			// Skip unparseable cards rather than failing the whole batch.
+			continue
 		}
+		card.Saved = true
+		if card.ListingURL == "" && card.ID != "" {
+			card.ListingURL = "https://www.linkedin.com/jobs/view/" + card.ID
+		}
+		cards = append(cards, card)
 	}
 
 	return cards, nil
 }
 
-// extractJobCard extracts a JobCard from a raw job card element.
-// isSaved marks the card as saved (for saved jobs list context).
-func extractJobCard(elem interface{}, isSaved bool) *types.JobCard {
-	if elem == nil {
+// findCollectionElements locates the elements array in the saved-jobs data
+// envelope. The saved query nests results under a collection key
+// (jobsDashJobCardsByJobCollections) whose exact name is matched generically:
+// any sub-object carrying a non-empty "elements" array is used.
+func findCollectionElements(dataRaw json.RawMessage) []json.RawMessage {
+	if len(dataRaw) == 0 {
 		return nil
 	}
 
-	card := &types.JobCard{
-		Saved: isSaved,
-	}
-
-	// Navigate through possible nesting layers.
-	// LinkedIn wraps job cards: elem → jobCard → jobPostingCard → ...
-	jc := nav(elem, "jobCard")
-	if jc == nil {
-		jc = nav(elem, "jobPostingCard")
-	}
-	if jc == nil {
-		jc = elem
-	}
-
-	// URN.
-	card.URN = strPath(jc, "entityUrn")
-	if card.URN == "" {
-		card.URN = strPath(elem, "entityUrn")
-	}
-
-	// Extract ID from URN.
-	if u, err := types.ParseURN(card.URN); err == nil {
-		card.ID = u.ID
-	}
-
-	// Job title.
-	card.Title = strPath(jc, "jobPostingTitle", "title")
-	if card.Title == "" {
-		card.Title = strPath(jc, "title")
-	}
-
-	// Company name.
-	card.Company = strPath(jc, "primaryDescription", "text")
-	if card.Company == "" {
-		card.Company = strPath(jc, "companyName")
-	}
-
-	// Company URN.
-	card.CompanyURN = strPath(jc, "logo", "attributes", "0", "detailData", "nonEntityCompanyLogo", "companyUrn")
-	if card.CompanyURN == "" {
-		card.CompanyURN = strPath(jc, "companyUrn")
-	}
-
-	// Location.
-	card.Location = strPath(jc, "secondaryDescription", "text")
-	if card.Location == "" {
-		card.Location = strPath(jc, "formattedLocation")
-	}
-
-	// Posted date.
-	card.PostedAt = strPath(jc, "footerItems", "0", "timeAt")
-	if card.PostedAt == "" {
-		card.PostedAt = strPath(jc, "listedAt")
-	}
-
-	// Applicant count.
-	card.ApplicantCount = strPath(jc, "applicantCountText")
-
-	// Easy Apply.
-	if ea := nav(jc, "easyApplyEnabled"); ea != nil {
-		card.EasyApply = boolVal(ea)
-	}
-	if am := strPath(jc, "applyMethod", "$type"); am != "" {
-		if am == "com.linkedin.jobs.shared.EasyApplyMethod" {
-			card.EasyApply = true
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(dataRaw, &top); err == nil {
+		for _, v := range top {
+			var sub struct {
+				Elements []json.RawMessage `json:"elements"`
+			}
+			if err := json.Unmarshal(v, &sub); err == nil && len(sub.Elements) > 0 {
+				return sub.Elements
+			}
 		}
 	}
 
-	// Listing URL.
-	if card.ID != "" {
-		card.ListingURL = "https://www.linkedin.com/jobs/view/" + card.ID
+	// Some responses carry elements directly on data.
+	var direct struct {
+		Elements []json.RawMessage `json:"elements"`
+	}
+	if err := json.Unmarshal(dataRaw, &direct); err == nil && len(direct.Elements) > 0 {
+		return direct.Elements
 	}
 
-	// Skip empty cards.
-	if card.URN == "" && card.Title == "" {
-		return nil
-	}
-
-	return card
+	return nil
 }

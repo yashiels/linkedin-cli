@@ -427,14 +427,15 @@ func extractJobCardFromEntity(entityRaw json.RawMessage, entityMap map[string]js
 	}
 
 	return types.JobCard{
-		URN:       jobURN,
-		ID:        jobID,
-		Title:     entity.Title,
-		Company:   companyName,
-		Location:  entity.FormattedLocation,
-		PostedAt:  postedAt,
-		EasyApply: easyApply,
-		Remote:    remote,
+		URN:        jobURN,
+		ID:         jobID,
+		Title:      entity.Title,
+		Company:    companyName,
+		Location:   entity.FormattedLocation,
+		PostedAt:   postedAt,
+		EasyApply:  easyApply,
+		Remote:     remote,
+		ListingURL: jobListingURL(jobID),
 	}, nil
 }
 
@@ -515,14 +516,15 @@ func extractJobCardFromPostingCard(raw json.RawMessage, _ map[string]json.RawMes
 	remote := strings.Contains(strings.ToLower(location), "remote")
 
 	return types.JobCard{
-		URN:       jobURN,
-		ID:        jobID,
-		Title:     title,
-		Company:   jpc.PrimaryDescription.Text,
-		Location:  location,
-		PostedAt:  formatPostedTime(listedAt),
-		EasyApply: easyApply,
-		Remote:    remote,
+		URN:        jobURN,
+		ID:         jobID,
+		Title:      title,
+		Company:    jpc.PrimaryDescription.Text,
+		Location:   location,
+		PostedAt:   formatPostedTime(listedAt),
+		EasyApply:  easyApply,
+		Remote:     remote,
+		ListingURL: jobListingURL(jobID),
 	}, nil
 }
 
@@ -605,6 +607,15 @@ func formatPostedTime(epochMs int64) string {
 	default:
 		return t.Format("Jan 2006")
 	}
+}
+
+// jobListingURL builds the public LinkedIn job listing URL for a numeric job
+// ID. Returns "" when the ID is empty so callers leave ListingURL unset.
+func jobListingURL(id string) string {
+	if id == "" {
+		return ""
+	}
+	return "https://www.linkedin.com/jobs/view/" + id
 }
 
 // ExtractJobID returns the numeric job ID from a LinkedIn job posting URN.
