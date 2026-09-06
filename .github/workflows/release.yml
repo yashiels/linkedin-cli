@@ -69,14 +69,52 @@ jobs:
     runs-on: ubuntu-latest
     needs: release
     steps:
-      - name: Dispatch tap update
+      - name: Resolve release tag
+        run: echo "RELEASE_TAG=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_ENV"
+
+      - name: Dispatch tap formula update
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          tag="${{ inputs.tag || github.ref_name }}"
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Set HOMEBREW_TAP_TOKEN with workflow access to yashiels/homebrew-tap"
+            exit 1
+          fi
+
+          request_id="lnk-${RELEASE_TAG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          expected_title="Update lnk for ${RELEASE_TAG} (${request_id})"
+
           gh workflow run update-formula.yml \
             --repo yashiels/homebrew-tap \
+            --ref main \
             -f formula=lnk \
-            -f tag="$tag" \
+            -f tag="$RELEASE_TAG" \
             -f repository=yashiels/linkedin-cli \
-            -f artifact_template='lnk_{version}_{target}.tar.gz'
+            -f artifact_template="lnk_{version}_{target}.tar.gz" \
+            -f request_id="$request_id"
+
+          run_id=""
+          for _ in {1..30}; do
+            run_id=$(gh run list \
+              --repo yashiels/homebrew-tap \
+              --workflow update-formula.yml \
+              --branch main \
+              --event workflow_dispatch \
+              --limit 20 \
+              --json databaseId,displayTitle \
+              --jq ".[] | select(.displayTitle == \"$expected_title\") | .databaseId" | head -n1)
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$run_id" ]; then
+            echo "::error::Could not find tap workflow run with title: $expected_title"
+            exit 1
+          fi
+
+          gh run watch "$run_id" \
+            --repo yashiels/homebrew-tap \
+            --exit-status \
+            --interval 10
