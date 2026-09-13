@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "projectType": "go",
+  "targets": [
+    {
+      "name": "lnk",
+      "type": "executable",
+      "enabled": true,
+      "buildCommand": "make build",
+      "outputPath": "./lnk",
+      "watchPaths": ["**/*.go", "go.mod", "go.sum", "Makefile"]
+    }
+  ]
+}
