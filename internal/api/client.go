@@ -66,6 +66,8 @@ func WithDebug(v bool) Option { return func(c *Client) { c.debug = v } }
 // WithErrWriter sets the writer used for diagnostic output (default os.Stderr).
 func WithErrWriter(w io.Writer) Option { return func(c *Client) { c.errOut = w } }
 
+func WithHTTPClient(client *http.Client) Option { return func(c *Client) { c.http = client } }
+
 // New creates a Client using the provided credentials.
 func New(creds auth.Credentials, opts ...Option) *Client {
 	c := &Client{

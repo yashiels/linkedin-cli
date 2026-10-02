@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -33,8 +34,8 @@ This command:
   4. Asks for confirmation (unless --confirm or --no-input is set)
   5. Submits the application
 
-If Easy Apply is not available, the external application URL is printed
-instead and no application is submitted.`,
+If Easy Apply is not available, an observed employer application URL is shown
+as unverified. The LinkedIn listing URL is never presented as an employer URL.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runApply(cmd, args[0], runApplyOpts{
@@ -61,6 +62,8 @@ type runApplyOpts struct {
 	json, plain, quiet, verbose, debug, noColor bool
 	noInput, dryRun, confirm                    bool
 }
+
+var newApplyClient = api.New
 
 func runApply(cmd *cobra.Command, jobID string, opts runApplyOpts) error {
 	store, err := auth.Default()
@@ -94,7 +97,7 @@ func runApply(cmd *cobra.Command, jobID string, opts runApplyOpts) error {
 	)
 
 	// Build API client.
-	client := api.New(creds,
+	client := newApplyClient(creds,
 		api.WithVerbose(opts.verbose),
 		api.WithDebug(opts.debug),
 		api.WithErrWriter(os.Stderr),
@@ -106,18 +109,14 @@ func runApply(cmd *cobra.Command, jobID string, opts runApplyOpts) error {
 	if err != nil {
 		return fmt.Errorf("fetching job: %w", err)
 	}
-
-	// Print job header.
-	fmt.Fprintf(cmd.OutOrStdout(), "\n%s\n", detail.Title)
-	if detail.Company != "" || detail.Location != "" {
-		parts := []string{}
-		if detail.Company != "" {
-			parts = append(parts, detail.Company)
-		}
-		if detail.Location != "" {
-			parts = append(parts, detail.Location)
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s\n\n", strings.Join(parts, " · "))
+	if err := ensureApplicationCanProceed(detail); err != nil {
+		return err
+	}
+	if detail.Application.Status != types.ApplicationAccepting {
+		return writeNonEasyApplyResult(cmd.OutOrStdout(), w, detail, opts.json)
+	}
+	if !opts.json {
+		printApplyJobHeader(cmd.OutOrStdout(), detail)
 	}
 
 	// Step 2: Check Easy Apply availability.
@@ -128,45 +127,21 @@ func runApply(cmd *cobra.Command, jobID string, opts runApplyOpts) error {
 	}
 
 	// Step 3: Not Easy Apply → external URL.
-	if !status.Available && !detail.EasyApply {
-		externalURL := api.ExternalApplyURL(jobID)
-		fmt.Fprintf(cmd.OutOrStdout(), "This job does not support Easy Apply.\n")
-		fmt.Fprintf(cmd.OutOrStdout(), "Apply externally at: %s\n", externalURL)
-
-		if opts.json {
-			return w.JSON(map[string]interface{}{
-				"easyApply":   false,
-				"externalUrl": externalURL,
-				"jobId":       detail.ID,
-				"title":       detail.Title,
-				"company":     detail.Company,
-			})
-		}
-		return nil
+	if !status.Available {
+		detail.EasyApply = false
+		detail.Application.Status = types.ApplicationUnverified
+		detail.Application.Source = "linkedin-easy-apply-check"
+		detail.Application.Evidence = "LinkedIn did not return the current Easy Apply form control."
+		detail.Application.Reason = "Easy Apply availability could not be confirmed."
+		return writeNonEasyApplyResult(cmd.OutOrStdout(), w, detail, opts.json)
 	}
 
 	// Step 4: Show what will be submitted.
-	fmt.Fprintf(cmd.OutOrStdout(), "Easy Apply available ⚡\n\n")
-	fmt.Fprintf(cmd.OutOrStdout(), "Application summary:\n")
-	if status.Name != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Name:   %s\n", status.Name)
+	if !opts.json {
+		printEasyApplySummary(cmd.OutOrStdout(), status)
 	}
-	if status.Email != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Email:  %s\n", status.Email)
-	}
-	if status.Phone != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Phone:  %s\n", status.Phone)
-	}
-	if status.Resume != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Resume: %s\n", status.Resume)
-	}
-	if status.Name == "" && status.Email == "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "  (profile data will be submitted from your LinkedIn profile)\n")
-	}
-	fmt.Fprintln(cmd.OutOrStdout())
 
 	if opts.dryRun {
-		fmt.Fprintf(cmd.OutOrStdout(), "Dry run — not submitting.\n")
 		if opts.json {
 			return w.JSON(map[string]interface{}{
 				"dryRun":    true,
@@ -179,6 +154,7 @@ func runApply(cmd *cobra.Command, jobID string, opts runApplyOpts) error {
 				"resume":    status.Resume,
 			})
 		}
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Dry run — not submitting.")
 		return nil
 	}
 
@@ -208,9 +184,6 @@ func runApply(cmd *cobra.Command, jobID string, opts runApplyOpts) error {
 	}
 
 	// Step 7: Success.
-	fmt.Fprintf(cmd.OutOrStdout(), "✓ Application submitted!\n")
-	fmt.Fprintf(cmd.OutOrStdout(), "  %s at %s\n", detail.Title, detail.Company)
-
 	if opts.json {
 		return w.JSON(map[string]interface{}{
 			"success": true,
@@ -219,8 +192,83 @@ func runApply(cmd *cobra.Command, jobID string, opts runApplyOpts) error {
 			"company": detail.Company,
 		})
 	}
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "✓ Application submitted!")
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %s at %s\n", detail.Title, detail.Company)
 
 	return nil
+}
+
+func ensureApplicationCanProceed(detail *types.JobDetail) error {
+	if detail.Application.Status == types.ApplicationClosed {
+		return fmt.Errorf("job is closed; application will not be submitted")
+	}
+	return nil
+}
+
+func printApplyJobHeader(out io.Writer, detail *types.JobDetail) {
+	_, _ = fmt.Fprintf(out, "\n%s\n", detail.Title)
+	if detail.Company == "" && detail.Location == "" {
+		return
+	}
+	parts := make([]string, 0, 2)
+	if detail.Company != "" {
+		parts = append(parts, detail.Company)
+	}
+	if detail.Location != "" {
+		parts = append(parts, detail.Location)
+	}
+	_, _ = fmt.Fprintf(out, "%s\n\n", strings.Join(parts, " · "))
+}
+
+func printEasyApplySummary(out io.Writer, status *api.EasyApplyStatus) {
+	_, _ = fmt.Fprintln(out, "Easy Apply available ⚡")
+	_, _ = fmt.Fprintln(out, "\nApplication summary:")
+	if status.Name != "" {
+		_, _ = fmt.Fprintf(out, "  Name:   %s\n", status.Name)
+	}
+	if status.Email != "" {
+		_, _ = fmt.Fprintf(out, "  Email:  %s\n", status.Email)
+	}
+	if status.Phone != "" {
+		_, _ = fmt.Fprintf(out, "  Phone:  %s\n", status.Phone)
+	}
+	if status.Resume != "" {
+		_, _ = fmt.Fprintf(out, "  Resume: %s\n", status.Resume)
+	}
+	if status.Name == "" && status.Email == "" {
+		_, _ = fmt.Fprintln(out, "  (profile data will be submitted from your LinkedIn profile)")
+	}
+	_, _ = fmt.Fprintln(out)
+}
+
+func writeNonEasyApplyResult(out io.Writer, writer *output.Writer, detail *types.JobDetail, jsonMode bool) error {
+	if jsonMode {
+		return writer.JSON(map[string]interface{}{
+			"easyApply":         false,
+			"externalUrl":       detail.Application.ApplyURL,
+			"applyUrl":          detail.Application.ApplyURL,
+			"listingUrl":        detail.ListingURL,
+			"applicationStatus": detail.Application.Status,
+			"jobId":             detail.ID,
+			"title":             detail.Title,
+			"company":           detail.Company,
+		})
+	}
+	printApplyJobHeader(out, detail)
+	printNonEasyApply(out, detail)
+	return nil
+}
+
+func printNonEasyApply(out io.Writer, detail *types.JobDetail) {
+	_, _ = fmt.Fprintln(out, "This job does not have a verified LinkedIn Easy Apply control.")
+	if detail.Application.ApplyURL != "" {
+		_, _ = fmt.Fprintf(out, "Observed employer application URL (unverified): %s\n", detail.Application.ApplyURL)
+	} else {
+		_, _ = fmt.Fprintln(out, "No employer application URL was observed.")
+	}
+	if detail.ListingURL != "" {
+		_, _ = fmt.Fprintf(out, "LinkedIn listing: %s\n", detail.ListingURL)
+	}
 }
 
 // isTerminalStdin reports whether stdin is a real terminal.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 const (
@@ -110,16 +111,8 @@ func parseEasyApplyCheck(raw json.RawMessage) (*EasyApplyStatus, error) {
 		return status, nil
 	}
 
-	// Available: onsiteApply flag, applyCtaText presence, or $type field.
-	if boolVal(nav(appDetail, "onsiteApply")) {
-		status.Available = true
-	}
-	if strPath(appDetail, "applyCtaText", "text") != "" {
-		status.Available = true
-	}
-	if strPath(appDetail, "$type") != "" {
-		status.Available = true
-	}
+	cta := strings.Join(strings.Fields(strings.ToLower(strPath(appDetail, "applyCtaText", "text"))), " ")
+	status.Available = boolVal(nav(appDetail, "onsiteApply")) && cta == "easy apply"
 
 	// Prefill data (may not be present for all jobs / account states).
 	if name := strPath(appDetail, "applicantName"); name != "" {
@@ -139,11 +132,6 @@ func parseEasyApplyCheck(raw json.RawMessage) (*EasyApplyStatus, error) {
 	}
 	if status.Resume == "" {
 		status.Resume = strPath(appDetail, "resumeDocumentName")
-	}
-
-	// If any prefill data exists, confirm Easy Apply is available.
-	if status.Name != "" || status.Email != "" {
-		status.Available = true
 	}
 
 	// Store the raw form for submission.
@@ -184,50 +172,6 @@ func (c *Client) SubmitEasyApply(jobID string, status *EasyApplyStatus) error {
 	}
 
 	return nil
-}
-
-// ExternalApplyURL returns the external application URL for a job that
-// does not support Easy Apply.
-func ExternalApplyURL(jobID string) string {
-	bareID := jobID
-	if u, err := parseJobURN(jobID); err == nil {
-		bareID = u
-	}
-	return "https://www.linkedin.com/jobs/view/" + url.PathEscape(bareID)
-}
-
-// parseJobURN returns the bare numeric ID from a job URN or the original
-// string if it's already a bare ID.
-func parseJobURN(urn string) (string, error) {
-	if !isURN(urn) {
-		return urn, nil
-	}
-	u, err := parseGenericURN(urn)
-	if err != nil {
-		return urn, err
-	}
-	return u, nil
-}
-
-func isURN(s string) bool {
-	return len(s) > 4 && s[:4] == "urn:"
-}
-
-func parseGenericURN(urn string) (string, error) {
-	// urn:li:fsd_jobPosting:1234567890
-	parts := make([]string, 0, 4)
-	start := 0
-	for i, ch := range urn {
-		if ch == ':' {
-			parts = append(parts, urn[start:i])
-			start = i + 1
-		}
-	}
-	parts = append(parts, urn[start:])
-	if len(parts) < 4 {
-		return "", fmt.Errorf("invalid URN: %s", urn)
-	}
-	return parts[len(parts)-1], nil
 }
 
 // SaveJob saves a job to the user's saved jobs collection.

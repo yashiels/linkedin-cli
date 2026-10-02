@@ -18,7 +18,7 @@ import (
 
 // NewJobCmd returns the "lnk job" command.
 func NewJobCmd(noInput, flagJSON, flagPlain, flagQuiet, flagVerbose, flagDebug, flagNoColor *bool) *cobra.Command {
-	var flagOpen bool
+	var flagOpen, flagCheckApply bool
 
 	cmd := &cobra.Command{
 		Use:   "job <job-id>",
@@ -30,24 +30,26 @@ The job-id can be a bare numeric ID (e.g. 4418763611) or a full URN
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runJobDetail(cmd, args[0], runJobDetailOpts{
-				json:    *flagJSON,
-				plain:   *flagPlain,
-				quiet:   *flagQuiet,
-				verbose: *flagVerbose,
-				debug:   *flagDebug,
-				noColor: *flagNoColor,
-				open:    flagOpen,
+				json:       *flagJSON,
+				plain:      *flagPlain,
+				quiet:      *flagQuiet,
+				verbose:    *flagVerbose,
+				debug:      *flagDebug,
+				noColor:    *flagNoColor,
+				open:       flagOpen,
+				checkApply: flagCheckApply,
 			})
 		},
 	}
 
 	cmd.Flags().BoolVar(&flagOpen, "open", false, "Open the job URL in the default browser")
+	cmd.Flags().BoolVar(&flagCheckApply, "check-apply", false, "Verify whether the application route is currently accepting")
 
 	return cmd
 }
 
 type runJobDetailOpts struct {
-	json, plain, quiet, verbose, debug, noColor, open bool
+	json, plain, quiet, verbose, debug, noColor, open, checkApply bool
 }
 
 func runJobDetail(cmd *cobra.Command, jobID string, opts runJobDetailOpts) error {
@@ -92,6 +94,9 @@ func runJobDetail(cmd *cobra.Command, jobID string, opts runJobDetailOpts) error
 	detail, err := client.GetJobDetail(jobID)
 	if err != nil {
 		return fmt.Errorf("fetching job: %w", err)
+	}
+	if opts.checkApply {
+		detail.Application = client.CheckApplication(cmd.Context(), detail)
 	}
 
 	// Open in browser if requested.
@@ -169,6 +174,20 @@ func printJobDetailHuman(out io.Writer, d *types.JobDetail) {
 		fmt.Fprintf(out, "\n⚠  This job posting has expired.\n")
 	}
 
+	_, _ = fmt.Fprintf(out, "\nApplication: %s\n", d.Application.Status)
+	if d.Application.Evidence != "" {
+		_, _ = fmt.Fprintf(out, "Evidence: %s\n", d.Application.Evidence)
+	}
+	if d.Application.Reason != "" {
+		_, _ = fmt.Fprintf(out, "Reason: %s\n", d.Application.Reason)
+	}
+	if d.Application.CheckedAt != "" {
+		_, _ = fmt.Fprintf(out, "Checked: %s\n", d.Application.CheckedAt)
+	}
+	if d.Application.ApplyURL != "" {
+		_, _ = fmt.Fprintf(out, "Apply URL: %s\n", d.Application.ApplyURL)
+	}
+
 	// Description section.
 	if d.Description != "" {
 		fmt.Fprintf(out, "\nDescription:\n")
@@ -199,9 +218,8 @@ func printJobDetailHuman(out io.Writer, d *types.JobDetail) {
 		)
 	}
 
-	// Listing URL.
 	if d.ListingURL != "" {
-		fmt.Fprintf(out, "\nURL: %s\n", d.ListingURL)
+		_, _ = fmt.Fprintf(out, "\nListing URL: %s\n", d.ListingURL)
 	}
 }
 
@@ -215,7 +233,7 @@ func printJobDetailPlain(w *output.Writer, d *types.JobDetail) {
 	// Collapse newlines for plain output.
 	desc = strings.ReplaceAll(desc, "\n", " ")
 
-	w.Plain(d.ID, d.Title, d.Company, d.Location, d.PostedAt, easyApply, d.Salary, desc)
+	w.Plain(d.ID, d.Title, d.Company, d.Location, d.PostedAt, easyApply, d.Salary, desc, string(d.Application.Status), d.Application.ApplyURL)
 }
 
 // formatSalary formats a salary integer with thousands separators.

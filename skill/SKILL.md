@@ -68,7 +68,7 @@ CI or headless use without writing cookies to disk):
 | Command | Description |
 |---|---|
 | `lnk search <keywords> [flags]` | Search job listings |
-| `lnk job <job-id> [--open]` | View full details of a posting (`job-id` bare numeric or `urn:li:fsd_jobPosting:<id>`); `--open` opens in browser |
+| `lnk job <job-id> [--open] [--check-apply]` | View full details; `--check-apply` verifies the current application route and may anonymously fetch a supported employer ATS URL |
 | `lnk feed [-n/--limit N]` | Recommended job feed (Jobs You May Be Interested In) |
 
 `search` flags:
@@ -86,14 +86,58 @@ CI or headless use without writing cookies to disk):
 
 ## Apply
 
+Job JSON preserves all existing fields and adds `application`:
+
+- `status`: `accepting`, `closed`, or `unverified`.
+- `source`, `evidence`, and `reason`: what supports the status and why.
+- `checkedAt`: when the current LinkedIn or employer check ran.
+- `applyUrl`: a real employer URL observed in LinkedIn data, when present. This
+  is distinct from `listingUrl`.
+- `applicantTrackingSystem`: the ATS name observed in LinkedIn data, when present.
+
+For one observed URL, empty ATS metadata is ignored when a real provider name is
+also present. Conflicting non-empty names clear the provider and remain
+`unverified`. Multiple observed URLs retain one deterministic URL without choosing
+an ATS, so no arbitrary destination is externally verified.
+
+Use `lnk job <job-id> --check-apply --json` before treating a discovery result as
+apply-now. `accepting` requires LinkedIn `LISTED` plus `onsiteApply: true` and the
+exact Easy Apply CTA, an identified Lever POST form with an active submission
+control inside it, or Workday JSON with boolean `jobPostingInfo.canApply: true`.
+`closed` requires LinkedIn `CLOSED`/`SUSPENDED` or Workday JSON
+`jobPostingInfo.canApply: false`. Everything else is `unverified`: missing or disabled controls,
+unknown job state, unsupported ATS sites, login/challenge walls, failed requests,
+and pages that merely return HTTP 200. `expired: false`, `jobState: LISTED`, a
+generated listing URL, a form of an unknown kind, or “Apply” text in a description
+are not proof.
+
+External verification is intentionally narrow. Lever and Workday are the only
+supported employer checks. Workday landing HTML is not JSON proof and remains
+`unverified`. The checker uses HTTPS only, permits at most three same-posting safe
+redirects, has an eight-second timeout and 1 MiB body limit, rejects non-public
+destinations, closes idle connections after each verification, and never sends
+LinkedIn cookies, Authorization, or CSRF headers to employers.
+
+Lever uses the official Go HTML5 parser. A submission control must belong to the
+validated form, preserve POST and the posting target, and have no supported hidden
+signal on itself or an ancestor: `hidden`, `aria-hidden=true`, a `hidden` class,
+or inline `display:none`/`visibility:hidden`. Full stylesheet layout is outside
+the verifier's scope.
+
+Lever free text is never treated as closure proof. If its parsed application form
+and control checks fail, the result is `unverified`; dated deadlines remain a
+separate manual check against the current job description.
+
 | Command | Description |
 |---|---|
 | `lnk apply <job-id> [--dry-run] [--confirm]` | Apply via Easy Apply |
 
 `apply` fetches the job, checks Easy Apply availability, shows what will be
-submitted (your profile data), asks for confirmation, then submits. If Easy
-Apply is not available it prints the external application URL and submits
-nothing. `--dry-run` previews without submitting; `--confirm` skips the prompt.
+submitted (your profile data), asks for confirmation, then submits. A known-closed
+job is rejected. If Easy Apply is unavailable, an observed employer URL is labeled
+unverified, or the command states that no employer URL was observed. It never
+labels the generated LinkedIn listing URL as an employer URL. `--dry-run` previews
+without submitting; `--confirm` skips the prompt.
 
 ## Saved jobs
 
@@ -128,7 +172,7 @@ prompting), `--config <path>`.
 ## Headless / agent usage
 
 **Read commands are safe to run unattended once credentials exist:** `search`,
-`job` (without `--open`), `feed`, `profile`, `saved list`, `alerts list`,
+`job` (without `--open`, including `--check-apply`), `feed`, `profile`, `saved list`, `alerts list`,
 `status`, `auth status`. Add `--json` (or `--plain`) to parse output. Avoid
 `job --open`, which launches a browser.
 
@@ -159,6 +203,20 @@ explicitly asks:**
 - `lnk alerts create` / `lnk alerts delete` — modify job-alert subscriptions.
 - `lnk auth logout` — deletes stored credentials.
 
+Never run an application, saved-job, or alert write without explicit consent for
+that exact action. Discovery is not consent.
+
+## Agent job-verification workflow
+
+1. Deduplicate daily search/feed results by job `id` before fetching details.
+2. Run `lnk job <job-id> --check-apply --json` for each candidate under review.
+3. Check the current description for a closing date. A passed or ambiguous date
+   excludes the job from apply-now even if the route reports `accepting`.
+4. Include only `application.status == "accepting"` in an apply-now shortlist.
+   Put `unverified` entries in a clearly separate manual-review queue.
+5. Evaluate suitability separately. State missing qualifications or experience
+   explicitly; CLI application proof does not establish candidate fit.
+
 ## Typical flow
 
 ```sh
@@ -168,7 +226,7 @@ lnk status                 # confirm logged in + API connected
 
 # 2. Search and inspect jobs
 lnk search "backend engineer" --location "Cape Town" --easy-apply --json
-lnk job 4414623196         # full detail for one posting
+lnk job 4414623196 --check-apply --json
 lnk feed --limit 10        # personalised recommendations
 
 # 3. Preview then apply (Easy Apply)
