@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/url"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html"
 )
@@ -143,21 +144,41 @@ func leverControlDisabled(control, form *html.Node) bool {
 }
 
 func leverControlHidden(control *html.Node, controlType string) bool {
-	if htmlBooleanAttribute(control, "hidden") || controlType == "hidden" {
+	if controlType == "hidden" {
 		return true
 	}
-	ariaHidden, _ := htmlAttribute(control, "aria-hidden")
+	for node := control; node != nil; node = node.Parent {
+		if htmlNodeHidden(node) {
+			return true
+		}
+	}
+	return false
+}
+
+func htmlNodeHidden(node *html.Node) bool {
+	if node.Type != html.ElementNode {
+		return false
+	}
+	if htmlBooleanAttribute(node, "hidden") {
+		return true
+	}
+	ariaHidden, _ := htmlAttribute(node, "aria-hidden")
 	if strings.EqualFold(strings.TrimSpace(ariaHidden), "true") {
 		return true
 	}
-	className, _ := htmlAttribute(control, "class")
+	className, _ := htmlAttribute(node, "class")
 	for _, value := range strings.Fields(strings.ToLower(className)) {
 		if value == "hidden" {
 			return true
 		}
 	}
-	style, _ := htmlAttribute(control, "style")
-	style = strings.ReplaceAll(strings.ToLower(style), " ", "")
+	style, _ := htmlAttribute(node, "style")
+	style = strings.Map(func(character rune) rune {
+		if unicode.IsSpace(character) {
+			return -1
+		}
+		return character
+	}, strings.ToLower(style))
 	return strings.Contains(style, "display:none") || strings.Contains(style, "visibility:hidden")
 }
 

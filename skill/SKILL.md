@@ -95,6 +95,11 @@ Job JSON preserves all existing fields and adds `application`:
   is distinct from `listingUrl`.
 - `applicantTrackingSystem`: the ATS name observed in LinkedIn data, when present.
 
+For one observed URL, empty ATS metadata is ignored when a real provider name is
+also present. Conflicting non-empty names clear the provider and remain
+`unverified`. Multiple observed URLs retain one deterministic URL without choosing
+an ATS, so no arbitrary destination is externally verified.
+
 Use `lnk job <job-id> --check-apply --json` before treating a discovery result as
 apply-now. `accepting` requires LinkedIn `LISTED` plus `onsiteApply: true` and the
 exact Easy Apply CTA, an identified Lever POST form with an active submission
@@ -112,6 +117,12 @@ supported employer checks. Workday landing HTML is not JSON proof and remains
 redirects, has an eight-second timeout and 1 MiB body limit, rejects non-public
 destinations, closes idle connections after each verification, and never sends
 LinkedIn cookies, Authorization, or CSRF headers to employers.
+
+Lever uses the official Go HTML5 parser. A submission control must belong to the
+validated form, preserve POST and the posting target, and have no supported hidden
+signal on itself or an ancestor: `hidden`, `aria-hidden=true`, a `hidden` class,
+or inline `display:none`/`visibility:hidden`. Full stylesheet layout is outside
+the verifier's scope.
 
 Lever free text is never treated as closure proof. If its parsed application form
 and control checks fail, the result is `unverified`; dated deadlines remain a

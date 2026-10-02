@@ -123,7 +123,7 @@ func parseJobDetail(raw json.RawMessage, originalID string) (*types.JobDetail, e
 			Reason: "LinkedIn returned no sufficient application-control evidence.",
 		},
 	}
-	observations := applicationObservations{}
+	observations := applicationObservations{routes: map[string]*applicationRouteObservation{}}
 
 	// Determine the bare numeric ID for URLs etc.
 	bareID := originalID
@@ -187,8 +187,11 @@ type applicationObservations struct {
 	contradictory bool
 	listed        bool
 	closedState   string
-	applyURL      string
-	ats           string
+	routes        map[string]*applicationRouteObservation
+}
+
+type applicationRouteObservation struct {
+	ats map[string]string
 }
 
 // parseTopCard extracts header information from a topCardV2 section object.
@@ -271,10 +274,7 @@ func observeApplicationAvailability(observations *applicationObservations, jpc i
 	}
 	ats := strPath(resolution, "applicantTrackingSystemName")
 	applyURL := strPath(resolution, "companyApplyUrl")
-	if applyURL != "" && (observations.applyURL == "" || applyURL < observations.applyURL) {
-		observations.applyURL = applyURL
-		observations.ats = ats
-	}
+	observeApplicationRoute(observations, applyURL, ats)
 	cta := strings.Join(strings.Fields(strings.ToLower(strPath(resolution, "applyCtaText", "text"))), " ")
 	onsiteApply, onsitePresent := nav(resolution, "onsiteApply").(bool)
 	positive := jobState == "LISTED" && onsitePresent && onsiteApply && cta == "easy apply"
@@ -287,9 +287,62 @@ func observeApplicationAvailability(observations *applicationObservations, jpc i
 	}
 }
 
+func observeApplicationRoute(observations *applicationObservations, applyURL, ats string) {
+	if applyURL == "" {
+		return
+	}
+	route := observations.routes[applyURL]
+	if route == nil {
+		route = &applicationRouteObservation{ats: map[string]string{}}
+		observations.routes[applyURL] = route
+	}
+	canonical := canonicalApplicantTrackingSystem(ats)
+	if canonical == "" {
+		return
+	}
+	key := strings.ToLower(canonical)
+	if existing := route.ats[key]; existing == "" || canonical < existing {
+		route.ats[key] = canonical
+	}
+}
+
+func canonicalApplicantTrackingSystem(ats string) string {
+	trimmed := strings.TrimSpace(ats)
+	switch strings.ToLower(trimmed) {
+	case "lever":
+		return "Lever"
+	case "workday":
+		return "Workday"
+	default:
+		return trimmed
+	}
+}
+
+func selectApplicationRoute(observations applicationObservations) (string, string, bool, bool) {
+	applyURL := ""
+	for observedURL := range observations.routes {
+		if applyURL == "" || observedURL < applyURL {
+			applyURL = observedURL
+		}
+	}
+	if applyURL == "" {
+		return "", "", false, false
+	}
+	route := observations.routes[applyURL]
+	multipleURLs := len(observations.routes) > 1
+	if multipleURLs || len(route.ats) > 1 {
+		return applyURL, "", len(route.ats) > 1, multipleURLs
+	}
+	for _, ats := range route.ats {
+		return applyURL, ats, false, false
+	}
+	return applyURL, "", false, false
+}
+
 func applyApplicationObservations(d *types.JobDetail, observations applicationObservations) {
-	d.Application.ApplyURL = observations.applyURL
-	d.Application.ApplicantTrackingSystem = observations.ats
+	applyURL, ats, conflictingATS, multipleURLs := selectApplicationRoute(observations)
+	d.Application.ApplyURL = applyURL
+	d.Application.ApplicantTrackingSystem = ats
 	d.Application.Source = "linkedin-control"
 	if observations.closedState != "" {
 		d.Expired = true
@@ -309,12 +362,22 @@ func applyApplicationObservations(d *types.JobDetail, observations applicationOb
 	}
 	d.EasyApply = false
 	d.Application.Status = types.ApplicationUnverified
+	if conflictingATS {
+		d.Application.Evidence = "LinkedIn returned conflicting applicant tracking system metadata for the same employer application URL."
+		d.Application.Reason = "The employer application provider could not be selected safely."
+		return
+	}
+	if multipleURLs {
+		d.Application.Evidence = "LinkedIn returned multiple employer application URLs."
+		d.Application.Reason = "A deterministic observed URL was retained without selecting an application provider."
+		return
+	}
 	if observations.positive && observations.contradictory {
 		d.Application.Evidence = "LinkedIn returned contradictory application-control metadata."
 		d.Application.Reason = "Application availability could not be verified consistently."
 		return
 	}
-	if observations.applyURL != "" {
+	if applyURL != "" {
 		d.Application.Evidence = "LinkedIn returned an employer application URL."
 		d.Application.Reason = "The employer application form has not been verified."
 		return

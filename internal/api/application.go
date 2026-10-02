@@ -40,6 +40,7 @@ var nonPublicApplicationNetworks = []netip.Prefix{
 	netip.MustParsePrefix("2001:20::/28"),
 	netip.MustParsePrefix("2001:db8::/32"),
 	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("fec0::/10"),
 }
 
 type employerApplicationChecker struct {

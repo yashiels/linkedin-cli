@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -294,6 +295,103 @@ func TestEmployerApplicationVerificationRejectsUnsafeDestinations(t *testing.T) 
 			}
 			if called {
 				t.Fatal("unsafe destination was requested")
+			}
+		})
+	}
+}
+
+func TestIPv6SiteLocalBoundary(t *testing.T) {
+	siteLocal := netip.MustParsePrefix("fec0::/10")
+	membership := []struct {
+		address string
+		inside  bool
+	}{
+		{address: "febf::", inside: false},
+		{address: "fec0::", inside: true},
+		{address: "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", inside: true},
+	}
+	for _, test := range membership {
+		address := netip.MustParseAddr(test.address)
+		if siteLocal.Contains(address) != test.inside {
+			t.Fatalf("fec0::/10 membership for %s = %t, want %t", address, siteLocal.Contains(address), test.inside)
+		}
+	}
+
+	publicity := []struct {
+		address string
+		public  bool
+	}{
+		{address: "febf::", public: false},
+		{address: "fec0::", public: false},
+		{address: "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", public: false},
+		{address: "2001:4860:4860::8888", public: true},
+	}
+	for _, test := range publicity {
+		got := isPublicApplicationIP(net.ParseIP(test.address))
+		if got != test.public {
+			t.Fatalf("public status for %s = %t, want %t", test.address, got, test.public)
+		}
+	}
+}
+
+func TestLeverApplicationVerificationRespectsAncestorVisibility(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want types.ApplicationStatus
+	}{
+		{
+			name: "hidden form",
+			body: `<form id="application-form" method="POST" hidden><button type="submit"></button></form>`,
+			want: types.ApplicationUnverified,
+		},
+		{
+			name: "aria hidden form",
+			body: `<form id="application-form" method="POST" aria-hidden="true"><button type="submit"></button></form>`,
+			want: types.ApplicationUnverified,
+		},
+		{
+			name: "display none form",
+			body: `<form id="application-form" method="POST" style="DISPLAY : none"><button type="submit"></button></form>`,
+			want: types.ApplicationUnverified,
+		},
+		{
+			name: "hidden wrapper",
+			body: `<form id="application-form" method="POST"><div hidden><button type="submit"></button></div></form>`,
+			want: types.ApplicationUnverified,
+		},
+		{
+			name: "hidden wrapper outside form",
+			body: `<div hidden><form id="application-form" method="POST"><button type="submit"></button></form></div>`,
+			want: types.ApplicationUnverified,
+		},
+		{
+			name: "aria hidden wrapper",
+			body: `<form id="application-form" method="POST"><div aria-hidden="true"><button type="submit"></button></div></form>`,
+			want: types.ApplicationUnverified,
+		},
+		{
+			name: "visibility hidden wrapper",
+			body: "<form id=\"application-form\" method=\"POST\"><div style=\"visibility:\n hidden\"><button type=\"submit\"></button></div></form>",
+			want: types.ApplicationUnverified,
+		},
+		{
+			name: "hidden class wrapper",
+			body: `<form id="application-form" method="POST"><div class="section hidden"><button type="submit"></button></div></form>`,
+			want: types.ApplicationUnverified,
+		},
+		{
+			name: "visible form and wrapper",
+			body: `<form id="application-form" method="POST"><div><button type="submit"></button></div></form>`,
+			want: types.ApplicationAccepting,
+		},
+	}
+	base := types.ApplicationAvailability{Status: types.ApplicationUnverified, ApplyURL: "https://jobs.lever.co/example/current/apply"}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := evaluateEmployerResponse(base, "lever", http.StatusOK, []byte(test.body))
+			if result.Status != test.want {
+				t.Fatalf("status = %q, want %q", result.Status, test.want)
 			}
 		})
 	}

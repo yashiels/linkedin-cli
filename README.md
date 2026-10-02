@@ -116,10 +116,16 @@ fields. Its status is deliberately conservative:
 says “Apply,” or the presence of an employer URL does not mean a job is accepting
 applications. `listingUrl` is the LinkedIn listing; `application.applyUrl` is an
 employer application URL observed in LinkedIn data. They are never interchangeable.
+For the same URL, blank ATS metadata does not replace a real provider. Conflicting
+non-empty ATS names remain `unverified`. When LinkedIn returns multiple employer
+URLs, one deterministic observed URL is retained without choosing a provider.
 
 `--check-apply` supports narrow proof checks for Lever and Workday. Lever must
 return the identified posting's POST application form with an active submission
-control inside that form. Workday must return JSON containing a boolean
+control inside that form. The control and its ancestors must also be visible by
+the supported HTML signals: `hidden`, `aria-hidden=true`, a `hidden` class, or
+inline `display:none`/`visibility:hidden`. This is not a complete CSS layout
+engine. Workday must return JSON containing a boolean
 `jobPostingInfo.canApply`; a normal Workday HTML landing page alone remains
 `unverified`. Other ATS destinations remain `unverified` and retain their observed
 URL for manual review. Employer checks require HTTPS, use an anonymous client that

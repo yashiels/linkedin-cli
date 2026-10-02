@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/yashiels/linkedin-cli/internal/types"
@@ -278,6 +279,123 @@ func TestParseJobDetailMissingOptionalControlDoesNotContradictPositiveEvidence(t
 	if detail.Application.Status != types.ApplicationAccepting || !detail.EasyApply {
 		t.Fatalf("detail = %#v", detail)
 	}
+}
+
+func TestParseJobDetailMergesSameURLATSDeterministically(t *testing.T) {
+	leverURL := "https://jobs.lever.co/example/current/apply"
+	workdayURL := "https://example.wd3.myworkdayjobs.com/en-US/example/job/current"
+	tests := []struct {
+		name    string
+		url     string
+		first   string
+		second  string
+		wantATS string
+	}{
+		{name: "blank then Lever", url: leverURL, second: "Lever", wantATS: "Lever"},
+		{name: "Lever then blank", url: leverURL, first: "Lever", wantATS: "Lever"},
+		{name: "blank then Workday", url: workdayURL, second: "Workday", wantATS: "Workday"},
+		{name: "Workday then blank", url: workdayURL, first: "Workday", wantATS: "Workday"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			detail := parseExternalApplicationObservations(t, []externalApplicationObservation{
+				{url: test.url, ats: test.first},
+				{url: test.url, ats: test.second},
+			})
+			if detail.Application.ApplyURL != test.url || detail.Application.ApplicantTrackingSystem != test.wantATS {
+				t.Fatalf("application = %#v", detail.Application)
+			}
+		})
+	}
+}
+
+func TestParseJobDetailConflictingSameURLATSIsUnverified(t *testing.T) {
+	applyURL := "https://jobs.lever.co/example/current/apply"
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "stale then Lever", first: "LegacyATS", second: "Lever"},
+		{name: "Lever then stale", first: "Lever", second: "LegacyATS"},
+		{name: "Lever then Workday", first: "Lever", second: "Workday"},
+		{name: "Workday then Lever", first: "Workday", second: "Lever"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			detail := parseExternalApplicationObservations(t, []externalApplicationObservation{
+				{url: applyURL, ats: test.first},
+				{url: applyURL, ats: test.second},
+			})
+			if detail.Application.Status != types.ApplicationUnverified || detail.Application.ApplicantTrackingSystem != "" {
+				t.Fatalf("application = %#v", detail.Application)
+			}
+			if !strings.Contains(strings.ToLower(detail.Application.Evidence), "conflicting") {
+				t.Fatalf("evidence = %q", detail.Application.Evidence)
+			}
+		})
+	}
+}
+
+func TestParseJobDetailMultipleExternalURLsRemainDeterministic(t *testing.T) {
+	firstURL := "https://careers.example.com/jobs/z"
+	secondURL := "https://careers.example.com/jobs/a"
+	for _, observations := range [][]externalApplicationObservation{
+		{{url: firstURL, ats: "FirstATS"}, {url: secondURL, ats: "SecondATS"}},
+		{{url: secondURL, ats: "SecondATS"}, {url: firstURL, ats: "FirstATS"}},
+	} {
+		detail := parseExternalApplicationObservations(t, observations)
+		if detail.Application.Status != types.ApplicationUnverified || detail.Application.ApplyURL != secondURL || detail.Application.ApplicantTrackingSystem != "" {
+			t.Fatalf("application = %#v", detail.Application)
+		}
+		if !strings.Contains(strings.ToLower(detail.Application.Evidence), "multiple") {
+			t.Fatalf("evidence = %q", detail.Application.Evidence)
+		}
+	}
+}
+
+type externalApplicationObservation struct {
+	url string
+	ats string
+}
+
+func parseExternalApplicationObservations(t *testing.T, observations []externalApplicationObservation) *types.JobDetail {
+	t.Helper()
+	sections := make([]interface{}, 0, len(observations))
+	for _, observation := range observations {
+		sections = append(sections, map[string]interface{}{
+			"topCardV2": map[string]interface{}{
+				"jobPostingCard": map[string]interface{}{
+					"jobPosting": map[string]interface{}{"jobState": "LISTED"},
+					"primaryActionV2": map[string]interface{}{
+						"applyJobAction": map[string]interface{}{
+							"applyJobActionResolutionResult": map[string]interface{}{
+								"onsiteApply":                 false,
+								"applyCtaText":                map[string]interface{}{"text": "Apply"},
+								"companyApplyUrl":             observation.url,
+								"applicantTrackingSystemName": observation.ats,
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+	raw, err := json.Marshal(map[string]interface{}{
+		"data": map[string]interface{}{
+			"jobsDashJobPostingDetailSectionsByCardSectionTypes": map[string]interface{}{
+				"elements": []interface{}{map[string]interface{}{"jobPostingDetailSection": sections}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := parseJobDetail(raw, "1234567890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return detail
 }
 
 func TestParseEasyApplyCheckRequiresEnabledOnsiteControl(t *testing.T) {
