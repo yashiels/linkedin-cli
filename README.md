@@ -30,6 +30,7 @@ Download from the [Releases](https://github.com/yashiels/linkedin-cli/releases) 
 lnk auth login                    # paste your li_at cookie
 lnk search "software engineer" --location "Cape Town" --easy-apply
 lnk job 4414623196                # view full job details
+lnk job 4414623196 --check-apply  # verify the current application route
 lnk apply 4414623196 --dry-run    # preview Easy Apply
 lnk profile johndoe               # view any profile
 lnk feed --limit 10               # recommended jobs
@@ -92,20 +93,52 @@ lnk job <job-id> [flags]
 | Flag | Description |
 |---|---|
 | `--open` | Open the job URL in your default browser |
+| `--check-apply` | Verify the current application route; may make bounded anonymous GETs to a supported employer ATS URL |
 
 **Example:**
 
 ```bash
 lnk job 4414623196
 lnk job 4414623196 --open
-lnk job 4414623196 --json
+lnk job 4414623196 --check-apply --json
 ```
+
+Job details include an `application` object while preserving the existing JSON
+fields. Its status is deliberately conservative:
+
+| Status | Meaning |
+|---|---|
+| `accepting` | LinkedIn returned `LISTED`, `onsiteApply: true`, and the exact Easy Apply CTA; or supported employer proof was verified |
+| `closed` | LinkedIn returns `CLOSED`/`SUSPENDED`, or Workday JSON returns `jobPostingInfo.canApply: false` |
+| `unverified` | No supported proof was available, including missing controls, unsupported ATS destinations, network failures, and login or challenge pages |
+
+`expired: false`, `jobState: LISTED`, an HTTP 200 response, description text that
+says “Apply,” or the presence of an employer URL does not mean a job is accepting
+applications. `listingUrl` is the LinkedIn listing; `application.applyUrl` is an
+employer application URL observed in LinkedIn data. They are never interchangeable.
+
+`--check-apply` supports narrow proof checks for Lever and Workday. Lever must
+return the identified posting's POST application form with an active submission
+control inside that form. Workday must return JSON containing a boolean
+`jobPostingInfo.canApply`; a normal Workday HTML landing page alone remains
+`unverified`. Other ATS destinations remain `unverified` and retain their observed
+URL for manual review. Employer checks require HTTPS, use an anonymous client that
+does not send LinkedIn credentials, reject non-public destinations and unsafe or
+cross-posting redirects, allow at most three redirects, read at most 1 MiB, and
+time out after eight seconds.
+
+Lever text such as “deadline passed” or “no longer accepting” is not structured
+closure proof. Without a valid active form, Lever remains `unverified`; agents must
+check dated deadlines separately in the current description.
 
 ---
 
 ### apply
 
-Apply to a job via Easy Apply.
+Apply to a job via Easy Apply. Known-closed jobs are rejected before the Easy
+Apply flow. If Easy Apply is unavailable, `lnk` reports an observed employer URL
+as unverified or reports that none was observed; it does not generate an employer
+URL from the LinkedIn listing.
 
 ```
 lnk apply <job-id> [flags]
@@ -123,6 +156,19 @@ lnk apply 4414623196 --dry-run    # preview the submission
 lnk apply 4414623196              # apply with confirmation prompt
 lnk apply 4414623196 --confirm    # apply without prompt
 ```
+
+## Read-only job verification workflow
+
+For job discovery or a daily scout:
+
+1. Deduplicate search results by the stable job `id`, not title or URL.
+2. Run `lnk job <job-id> --check-apply --json` for each candidate.
+3. Re-read any closing date in the current description and treat a passed or ambiguous deadline as not apply-now, regardless of status.
+4. Put only `application.status == "accepting"` jobs in an apply-now shortlist; keep `unverified` jobs in a separate manual-review list.
+5. Assess suitability separately and state qualification or experience gaps explicitly. Application proof says nothing about candidate fit.
+
+This workflow is read-only. Never run `lnk apply`, `lnk saved add/remove`, or
+`lnk alerts create/delete` without explicit user consent for that exact write.
 
 ---
 

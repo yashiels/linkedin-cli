@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/yashiels/linkedin-cli/internal/types"
 )
@@ -34,7 +35,12 @@ func (c *Client) GetJobDetail(jobID string) (*types.JobDetail, error) {
 		return nil, fmt.Errorf("job detail: %w", err)
 	}
 
-	return parseJobDetail(raw, jobID)
+	detail, err := parseJobDetail(raw, jobID)
+	if err != nil {
+		return nil, err
+	}
+	detail.Application.CheckedAt = time.Now().UTC().Format(time.RFC3339)
+	return detail, nil
 }
 
 // normaliseJobURN converts a bare numeric ID to a LinkedIn job URN.
@@ -110,7 +116,14 @@ func parseJobDetail(raw json.RawMessage, originalID string) (*types.JobDetail, e
 		return nil, fmt.Errorf("job detail: cannot decode response: %w", err)
 	}
 
-	detail := &types.JobDetail{}
+	detail := &types.JobDetail{
+		Application: types.ApplicationAvailability{
+			Status: types.ApplicationUnverified,
+			Source: "linkedin-control",
+			Reason: "LinkedIn returned no sufficient application-control evidence.",
+		},
+	}
+	observations := applicationObservations{}
 
 	// Determine the bare numeric ID for URLs etc.
 	bareID := originalID
@@ -150,7 +163,7 @@ func parseJobDetail(raw json.RawMessage, originalID string) (*types.JobDetail, e
 		sections := arr(nav(elem, "jobPostingDetailSection"))
 		for _, section := range sections {
 			if topCard := nav(section, "topCardV2"); topCard != nil {
-				parseTopCard(detail, topCard)
+				parseTopCard(detail, topCard, &observations)
 			}
 			if jobDesc := nav(section, "jobDescription"); jobDesc != nil {
 				parseDescriptionCard(detail, jobDesc)
@@ -158,19 +171,29 @@ func parseJobDetail(raw json.RawMessage, originalID string) (*types.JobDetail, e
 		}
 		// Legacy / fallback: sections without the jobPostingDetailSection wrapper.
 		if topCard := nav(elem, "topCardV2"); topCard != nil {
-			parseTopCard(detail, topCard)
+			parseTopCard(detail, topCard, &observations)
 		}
 		if jobDesc := nav(elem, "jobDescription"); jobDesc != nil {
 			parseDescriptionCard(detail, jobDesc)
 		}
 	}
+	applyApplicationObservations(detail, observations)
 
 	return detail, nil
 }
 
+type applicationObservations struct {
+	positive      bool
+	contradictory bool
+	listed        bool
+	closedState   string
+	applyURL      string
+	ats           string
+}
+
 // parseTopCard extracts header information from a topCardV2 section object.
 // The argument is the topCardV2 value — not the outer section wrapper.
-func parseTopCard(d *types.JobDetail, topCard interface{}) {
+func parseTopCard(d *types.JobDetail, topCard interface{}, observations *applicationObservations) {
 	// Current Voyager structure: topCardV2.jobPostingCard contains most fields.
 	jpc := nav(topCard, "jobPostingCard")
 	if jpc == nil {
@@ -226,23 +249,83 @@ func parseTopCard(d *types.JobDetail, topCard interface{}) {
 		}
 	}
 
-	// Easy Apply: onsiteApply flag or "Easy Apply" CTA text.
-	if boolVal(nav(jpc, "primaryActionV2", "applyJobAction", "applyJobActionResolutionResult", "onsiteApply")) {
-		d.EasyApply = true
-	}
-	if !d.EasyApply {
-		cta := strPath(jpc, "primaryActionV2", "applyJobAction", "applyJobActionResolutionResult", "applyCtaText", "text")
-		if strings.Contains(strings.ToLower(cta), "easy apply") {
-			d.EasyApply = true
-		}
-	}
+	observeApplicationAvailability(observations, jpc)
 
 	// Salary, employment type, seniority level from job insights.
 	parseSalaryFromInsights(d, jpc)
+}
 
-	// Job expired / closed.
-	if str(nav(jpc, "jobPosting", "jobState")) == "CLOSED" {
+func observeApplicationAvailability(observations *applicationObservations, jpc interface{}) {
+	jobState := strings.ToUpper(str(nav(jpc, "jobPosting", "jobState")))
+	if jobState == "LISTED" {
+		observations.listed = true
+	}
+	if jobState == "CLOSED" || jobState == "SUSPENDED" {
+		if observations.closedState == "" || jobState == "CLOSED" {
+			observations.closedState = jobState
+		}
+	}
+	resolution := nav(jpc, "primaryActionV2", "applyJobAction", "applyJobActionResolutionResult")
+	if resolution == nil {
+		return
+	}
+	ats := strPath(resolution, "applicantTrackingSystemName")
+	applyURL := strPath(resolution, "companyApplyUrl")
+	if applyURL != "" && (observations.applyURL == "" || applyURL < observations.applyURL) {
+		observations.applyURL = applyURL
+		observations.ats = ats
+	}
+	cta := strings.Join(strings.Fields(strings.ToLower(strPath(resolution, "applyCtaText", "text"))), " ")
+	onsiteApply, onsitePresent := nav(resolution, "onsiteApply").(bool)
+	positive := jobState == "LISTED" && onsitePresent && onsiteApply && cta == "easy apply"
+	if positive {
+		observations.positive = true
+		return
+	}
+	if onsitePresent || cta != "" || applyURL != "" || ats != "" {
+		observations.contradictory = true
+	}
+}
+
+func applyApplicationObservations(d *types.JobDetail, observations applicationObservations) {
+	d.Application.ApplyURL = observations.applyURL
+	d.Application.ApplicantTrackingSystem = observations.ats
+	d.Application.Source = "linkedin-control"
+	if observations.closedState != "" {
 		d.Expired = true
+		d.EasyApply = false
+		d.Application.Status = types.ApplicationClosed
+		d.Application.Source = "linkedin-job-state"
+		d.Application.Evidence = "LinkedIn returned jobState=" + observations.closedState + "."
+		d.Application.Reason = "LinkedIn reports that this listing is not accepting applications."
+		return
+	}
+	if observations.positive && !observations.contradictory {
+		d.EasyApply = true
+		d.Application.Status = types.ApplicationAccepting
+		d.Application.Evidence = "LinkedIn returned jobState=LISTED, onsiteApply=true, and the Easy Apply CTA."
+		d.Application.Reason = "LinkedIn returned consistent current Easy Apply metadata."
+		return
+	}
+	d.EasyApply = false
+	d.Application.Status = types.ApplicationUnverified
+	if observations.positive && observations.contradictory {
+		d.Application.Evidence = "LinkedIn returned contradictory application-control metadata."
+		d.Application.Reason = "Application availability could not be verified consistently."
+		return
+	}
+	if observations.applyURL != "" {
+		d.Application.Evidence = "LinkedIn returned an employer application URL."
+		d.Application.Reason = "The employer application form has not been verified."
+		return
+	}
+	if observations.contradictory {
+		d.Application.Evidence = "LinkedIn returned application metadata without sufficient active-state and CTA proof."
+		d.Application.Reason = "Easy Apply availability could not be verified."
+		return
+	}
+	if observations.listed {
+		d.Application.Evidence = "LinkedIn returned jobState=LISTED without sufficient application-control evidence."
 	}
 }
 

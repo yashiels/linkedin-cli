@@ -16,20 +16,39 @@ type JobCard struct {
 	ListingURL     string `json:"listingUrl,omitempty"`
 }
 
+type ApplicationStatus string
+
+const (
+	ApplicationAccepting  ApplicationStatus = "accepting"
+	ApplicationClosed     ApplicationStatus = "closed"
+	ApplicationUnverified ApplicationStatus = "unverified"
+)
+
+type ApplicationAvailability struct {
+	Status                  ApplicationStatus `json:"status"`
+	Source                  string            `json:"source"`
+	Evidence                string            `json:"evidence,omitempty"`
+	Reason                  string            `json:"reason"`
+	CheckedAt               string            `json:"checkedAt,omitempty"`
+	ApplyURL                string            `json:"applyUrl,omitempty"`
+	ApplicantTrackingSystem string            `json:"applicantTrackingSystem,omitempty"`
+}
+
 // JobDetail is the full representation of a job posting.
 type JobDetail struct {
 	JobCard
 
-	Description    string   `json:"description"`
-	Salary         string   `json:"salary,omitempty"`
-	SalaryMin      int64    `json:"salaryMin,omitempty"`
-	SalaryMax      int64    `json:"salaryMax,omitempty"`
-	SalaryCurr     string   `json:"salaryCurrency,omitempty"`
-	SeniorityLevel string   `json:"seniorityLevel,omitempty"`
-	EmploymentType string   `json:"employmentType,omitempty"`
-	Industries     []string `json:"industries,omitempty"`
-	Skills         []string `json:"skills,omitempty"`
-	HiringManager  string   `json:"hiringManager,omitempty"`
-	ClosedAt       string   `json:"closedAt,omitempty"`
-	Expired        bool     `json:"expired"`
+	Description    string                  `json:"description"`
+	Salary         string                  `json:"salary,omitempty"`
+	SalaryMin      int64                   `json:"salaryMin,omitempty"`
+	SalaryMax      int64                   `json:"salaryMax,omitempty"`
+	SalaryCurr     string                  `json:"salaryCurrency,omitempty"`
+	SeniorityLevel string                  `json:"seniorityLevel,omitempty"`
+	EmploymentType string                  `json:"employmentType,omitempty"`
+	Industries     []string                `json:"industries,omitempty"`
+	Skills         []string                `json:"skills,omitempty"`
+	HiringManager  string                  `json:"hiringManager,omitempty"`
+	ClosedAt       string                  `json:"closedAt,omitempty"`
+	Expired        bool                    `json:"expired"`
+	Application    ApplicationAvailability `json:"application"`
 }
