@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,6 +60,12 @@ func TestApplyUnavailableCheckJSONIsUnverified(t *testing.T) {
 
 func runApplyJSONCommand(t *testing.T, detailBody, applyBody string, flags ...string) map[string]interface{} {
 	t.Helper()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("LNK_CONFIG", filepath.Join(home, "config.toml"))
 	t.Setenv("LNK_LI_AT", "test-session")
 	t.Setenv("LNK_CSRF_TOKEN", "test-csrf")
 	originalFactory := newApplyClient

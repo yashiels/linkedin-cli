@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -37,20 +36,18 @@ func (c *Client) Ping() (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return "", types.NetworkError("reading LinkedIn ping failed", nil)
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return "", types.AuthError("session expired or credentials invalid")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("api: ping returned %d", resp.StatusCode)
+		return "", requestFailure(readOperation, resp.StatusCode, types.ExitGeneral, types.ReasonHTTPStatus)
 	}
-	if pop := resp.Header.Get("x-li-pop"); pop != "" {
-		return pop, nil
+	if err := validateJSON(body); err != nil {
+		return "", types.WithRequestDetails(err, http.MethodGet, readOperation.name(), resp.StatusCode, types.ReasonUnspecified)
 	}
-	if via := resp.Header.Get("via"); via != "" {
-		return via, nil
-	}
-	return "unknown", nil
+	return "connected", nil
 }

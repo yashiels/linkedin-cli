@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/yashiels/linkedin-cli/internal/safety"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -60,7 +62,27 @@ func fixtureResponse(code int, location string) *http.Response {
 	return &http.Response{StatusCode: code, Header: h, Body: io.NopCloser(strings.NewReader(`{}`))}
 }
 
-func fixtureClient(rt http.RoundTripper, opts ...Option) *Client {
+func fixtureClient(t *testing.T, rt http.RoundTripper, opts ...Option) *Client {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	policy, err := safety.New(root, safety.Config{Now: func() time.Time { return now }, Wait: func(ctx context.Context, d time.Duration) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		now = now.Add(d)
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts = append(opts, func(c *Client) { c.policy = policy })
 	return New(auth.Credentials{LiAt: "synthetic-li-at", CSRFToken: "synthetic-csrf"}, append([]Option{WithHTTPClient(&http.Client{Transport: rt})}, opts...)...)
 }
 
@@ -101,7 +123,7 @@ func TestRequestWrappersHeaders(t *testing.T) {
 	for _, tc := range requestWrappers() {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			c := fixtureClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			c := fixtureClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls++
 				if req.Method != tc.method || req.Header.Get("Accept") != tc.accept {
 					t.Errorf("method/accept: %s %s", req.Method, req.Header.Get("Accept"))
@@ -166,7 +188,7 @@ func TestRequestRedirects(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%d/%s", tc.name, status, loc.target), func(t *testing.T) {
 					calls := 0
 					var logs bytes.Buffer
-					c := fixtureClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+					c := fixtureClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 						calls++
 						if calls > 1 {
 							return fixtureResponse(200, ""), nil
@@ -210,7 +232,7 @@ func TestRequestClientOptions(t *testing.T) {
 			if timeoutFirst {
 				opts[0], opts[1] = opts[1], opts[0]
 			}
-			c := New(auth.Credentials{}, opts...)
+			c := fixtureClient(t, caller.Transport, opts...)
 			if c.http == caller || c.http.Timeout != 2*time.Second {
 				t.Error("client ownership or explicit timeout lost")
 			}
@@ -233,7 +255,7 @@ func TestRequestMutationFailures(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			c := fixtureClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+			c := fixtureClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 				calls++
 				return nil, errors.New("transport synthetic-secret https://external.invalid/private")
 			}))
@@ -357,7 +379,7 @@ func TestRequestDestinations(t *testing.T) {
 			t.Run(fmt.Sprintf("%d/%s", op, target), func(t *testing.T) {
 				calls := 0
 				var logs bytes.Buffer
-				c := fixtureClient(roundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return fixtureResponse(200, ""), nil }), WithDebug(true), WithErrWriter(&logs))
+				c := fixtureClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return fixtureResponse(200, ""), nil }), WithDebug(true), WithErrWriter(&logs))
 				_, err := c.send(context.Background(), op, target, nil)
 				if err == nil || calls != 0 {
 					t.Fatalf("error=%v admissions=%d", err, calls)
@@ -377,7 +399,7 @@ func TestRequestDestinations(t *testing.T) {
 
 func TestRequestPublicPathValidation(t *testing.T) {
 	for _, target := range []string{"/login", "/voyager/api/../login", "/voyager/api/%2e%2e/login", "//external.invalid/voyager/api/me", "/voyager/api/me#synthetic-secret", "https://external.invalid/voyager/api/me"} {
-		c := fixtureClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		c := fixtureClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 			t.Error("unsafe wrapper reached transport")
 			return fixtureResponse(200, ""), nil
 		}))
@@ -402,7 +424,7 @@ func TestRequestPublicPathValidation(t *testing.T) {
 func TestRequestQueryEncoding(t *testing.T) {
 	params := map[string]string{"action": "submit & continue?x=1#value", "key&=": "a+b / snow ☃"}
 	calls := 0
-	c := fixtureClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	c := fixtureClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
 		for key, value := range params {
 			if req.URL.Query().Get(key) != value {
@@ -424,15 +446,15 @@ func TestRequestQueryEncoding(t *testing.T) {
 
 func TestRequestContextLifecycle(t *testing.T) {
 	var request *http.Request
-	c := fixtureClient(roundTripFunc(func(req *http.Request) (*http.Response, error) { request = req; return fixtureResponse(200, ""), nil }))
+	c := fixtureClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) { request = req; return fixtureResponse(200, ""), nil }))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	response, err := c.send(ctx, readOperation, baseURL+"/voyager/api/me", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Context().Err() != nil {
-		t.Fatal("context canceled before body consumed")
+	if !errors.Is(request.Context().Err(), context.Canceled) {
+		t.Fatal("context not canceled after buffering original body")
 	}
 	response.Body.Close()
 	if !errors.Is(request.Context().Err(), context.Canceled) {
@@ -447,7 +469,7 @@ func TestRequestMutationRateLimits(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			c := fixtureClient(roundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return fixtureResponse(429, ""), nil }))
+			c := fixtureClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return fixtureResponse(429, ""), nil }))
 			err := tc.call(c)
 			var coded *types.LnkError
 			if !errors.As(err, &coded) || coded.Code != types.ExitRateLimit || calls != 1 {
@@ -477,17 +499,17 @@ func TestRequestReadRateLimitCompatibility(t *testing.T) {
 		}
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			c := fixtureClient(roundTripFunc(func(*http.Request) (*http.Response, error) {
+			c := fixtureClient(t, roundTripFunc(func(*http.Request) (*http.Response, error) {
 				calls++
 				if calls == 1 {
 					return fixtureResponse(429, ""), nil
 				}
 				return fixtureResponse(200, ""), nil
 			}))
-			if err := tc.call(c); err != nil {
-				t.Fatal(err)
+			if err := tc.call(c); err == nil {
+				t.Fatal("refusal ignored")
 			}
-			if calls != 2 {
+			if calls != 1 {
 				t.Fatalf("admissions=%d", calls)
 			}
 		})

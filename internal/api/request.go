@@ -5,15 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/yashiels/linkedin-cli/internal/safety"
 	"github.com/yashiels/linkedin-cli/internal/types"
 )
 
@@ -61,16 +60,9 @@ func authRedirect(origin *url.URL, location string) bool {
 	if err != nil || !linkedinOrigin(u) {
 		return false
 	}
-	p := u.EscapedPath()
-	for range 5 {
-		decoded, err := url.PathUnescape(p)
-		if err != nil {
-			return false
-		}
-		if decoded == p {
-			break
-		}
-		p = decoded
+	p, ok := decodeRedirectPath(u.EscapedPath())
+	if !ok {
+		return false
 	}
 	p = path.Clean(p)
 	for _, prefix := range []string{"/login", "/uas/login", "/authwall", "/checkpoint/challenge"} {
@@ -81,15 +73,69 @@ func authRedirect(origin *url.URL, location string) bool {
 	return false
 }
 
-type responseBody struct {
-	io.ReadCloser
-	cancel context.CancelFunc
+func decodeRedirectPath(p string) (string, bool) {
+	decoded := make([]byte, 0, len(p))
+	remaining := len(p) / 2
+	for i := range len(p) {
+		decoded = append(decoded, p[i])
+		for len(decoded) >= 3 && decoded[len(decoded)-3] == '%' {
+			high, highOK := hexDigit(decoded[len(decoded)-2])
+			low, lowOK := hexDigit(decoded[len(decoded)-1])
+			if !highOK || !lowOK {
+				break
+			}
+			if remaining == 0 {
+				return "", false
+			}
+			remaining--
+			decoded[len(decoded)-3] = high<<4 | low
+			decoded = decoded[:len(decoded)-2]
+		}
+	}
+	return string(decoded), true
 }
 
-func (b *responseBody) Close() error {
-	err := b.ReadCloser.Close()
-	b.cancel()
-	return err
+func hexDigit(b byte) (byte, bool) {
+	switch {
+	case b >= '0' && b <= '9':
+		return b - '0', true
+	case b >= 'a' && b <= 'f':
+		return b - 'a' + 10, true
+	case b >= 'A' && b <= 'F':
+		return b - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func (op operation) name() string {
+	switch op {
+	case readOperation:
+		return "read"
+	case graphQLReadOperation:
+		return "graphql"
+	case normalizedReadOperation:
+		return "normalized_read"
+	case postOperation:
+		return "post"
+	case deleteOperation:
+		return "delete"
+	default:
+		return ""
+	}
+}
+func (op operation) method() string {
+	switch op {
+	case postOperation:
+		return http.MethodPost
+	case deleteOperation:
+		return http.MethodDelete
+	default:
+		return http.MethodGet
+	}
+}
+func requestFailure(op operation, status, code int, reason types.DiagnosticReason) error {
+	return types.WithRequestDetails(types.NewError(code, "LinkedIn request failed"), op.method(), op.name(), status, reason)
 }
 
 func (c *Client) send(ctx context.Context, op operation, target string, payload []byte) (*http.Response, error) {
@@ -111,7 +157,17 @@ func (c *Client) send(ctx context.Context, op operation, target string, payload 
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	policy, err := c.requestPolicy()
+	if err != nil {
+		return nil, err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout+30*time.Second+policy.Delay())
+	defer cancel()
+	lease, err := policy.Admit(requestCtx)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Close()
 	req, err := http.NewRequestWithContext(requestCtx, method, u.String(), bytes.NewReader(payload))
 	if err != nil {
 		cancel()
@@ -131,72 +187,70 @@ func (c *Client) send(ctx context.Context, op operation, target string, payload 
 		c.logf("→ %s LinkedIn API", method)
 	}
 	resp, err := c.http.Do(req)
+
 	if err != nil {
-		cancel()
-		var timed net.Error
-		if errors.As(err, &timed) && timed.Timeout() {
-			return nil, types.NetworkError("LinkedIn request timed out", context.DeadlineExceeded)
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
 		}
-		return nil, types.NetworkError("LinkedIn request failed", nil)
+		return nil, requestFailure(op, 0, types.ExitNetwork, types.ReasonTransport)
 	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		resp.Body.Close()
-		cancel()
-		if authRedirect(u, resp.Header.Get("Location")) {
-			return nil, types.AuthError("session expired — run 'lnk auth login' to refresh")
-		}
-		return nil, types.NetworkError("LinkedIn redirect rejected", nil)
-	}
-	resp.Body = &responseBody{ReadCloser: resp.Body, cancel: cancel}
+	refusal := lease.Refusal(resp.StatusCode, resp.StatusCode >= 300 && resp.StatusCode < 400 && authRedirect(u, resp.Header.Get("Location")), resp.Header.Get("Retry-After"))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, safety.MaxBody+1))
+	closeErr := resp.Body.Close()
 	if c.verbose || c.debug {
 		c.logf("← %d LinkedIn API", resp.StatusCode)
 	}
+	if refusal != nil {
+		return nil, types.WithRequestDetails(refusal, method, op.name(), resp.StatusCode, types.ReasonRefusal)
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, requestFailure(op, resp.StatusCode, types.ExitNetwork, types.ReasonRedirect)
+	}
+	if readErr != nil || closeErr != nil || requestCtx.Err() != nil {
+		return nil, requestFailure(op, resp.StatusCode, types.ExitNetwork, types.ReasonResponseRead)
+	}
+	if len(body) > safety.MaxBody {
+		return nil, requestFailure(op, resp.StatusCode, types.ExitNetwork, types.ReasonResponseSize)
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 	return resp, nil
 }
 
 func (c *Client) readJSON(ctx context.Context, op operation, target string) (json.RawMessage, error) {
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			wait := baseBackoff * time.Duration(1<<(attempt-1))
-			c.logf("retrying LinkedIn read in %s (attempt %d/%d)", wait, attempt, maxRetries)
-			timer := time.NewTimer(wait)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil, types.NetworkError("LinkedIn read canceled", nil)
-			case <-timer.C:
-			}
-		}
-		resp, err := c.send(ctx, op, target, nil)
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				lastErr = err
-				continue
-			}
-			return nil, err
-		}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			resp.Body.Close()
-			lastErr = types.RateLimitError()
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			return nil, fmt.Errorf("api: unexpected status %d", resp.StatusCode)
-		}
-		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			lastErr = types.NetworkError("reading LinkedIn response failed", nil)
-			if op == graphQLReadOperation {
-				return nil, lastErr
-			}
-			continue
-		}
-		return json.RawMessage(body), nil
+
+	resp, err := c.send(ctx, op, target, nil)
+	if err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, requestFailure(op, resp.StatusCode, types.ExitGeneral, types.ReasonHTTPStatus)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, requestFailure(op, resp.StatusCode, types.ExitNetwork, types.ReasonResponseRead)
+	}
+	if err = validateJSON(body); err != nil {
+		return nil, types.WithRequestDetails(err, op.method(), op.name(), resp.StatusCode, types.ReasonUnspecified)
+	}
+	return json.RawMessage(body), nil
+}
+
+func validateJSON(body []byte) error {
+	if !json.Valid(body) {
+		return &types.LnkError{Code: types.ExitGeneral, Message: "api: invalid JSON response", Reason: types.ReasonJSON}
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil || envelope == nil {
+		return &types.LnkError{Code: types.ExitGeneral, Message: "api: invalid JSON response envelope", Reason: types.ReasonJSON}
+	}
+	if raw, exists := envelope["errors"]; exists && string(raw) != "null" {
+		var entries []json.RawMessage
+		if json.Unmarshal(raw, &entries) != nil || len(entries) > 0 {
+			return &types.LnkError{Code: types.ExitGeneral, Message: "api: GraphQL response contains errors", Reason: types.ReasonGraphQL}
+		}
+	}
+	return nil
 }
 
 func (c *Client) mutateJSON(ctx context.Context, op operation, target string, payload interface{}, strictDelete bool) (json.RawMessage, error) {
@@ -217,14 +271,17 @@ func (c *Client) mutateJSON(ctx context.Context, op operation, target string, pa
 		return nil, types.RateLimitError()
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (strictDelete && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent) {
-		return nil, fmt.Errorf("api: unexpected status %d", resp.StatusCode)
+		return nil, requestFailure(op, resp.StatusCode, types.ExitGeneral, types.ReasonHTTPStatus)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, types.NetworkError("reading LinkedIn response failed", nil)
+		return nil, requestFailure(op, resp.StatusCode, types.ExitNetwork, types.ReasonResponseRead)
 	}
 	if len(body) == 0 {
 		body = []byte("{}")
+	}
+	if err := validateJSON(body); err != nil {
+		return nil, types.WithRequestDetails(err, op.method(), op.name(), resp.StatusCode, types.ReasonUnspecified)
 	}
 	return json.RawMessage(body), nil
 }

@@ -1,6 +1,9 @@
 package types
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Exit code constants used throughout lnk.
 const (
@@ -12,11 +15,28 @@ const (
 	ExitRateLimit = 5 // Rate-limited by LinkedIn (HTTP 429)
 )
 
-// LnkError is an error that carries an exit code.
+type DiagnosticReason uint8
+
+const (
+	ReasonUnspecified DiagnosticReason = iota
+	ReasonHTTPStatus
+	ReasonRedirect
+	ReasonTransport
+	ReasonResponseRead
+	ReasonResponseSize
+	ReasonJSON
+	ReasonGraphQL
+	ReasonRefusal
+)
+
 type LnkError struct {
-	Code    int
-	Message string
-	Cause   error
+	Status    int
+	Method    string
+	Operation string
+	Reason    DiagnosticReason
+	Code      int
+	Message   string
+	Cause     error
 }
 
 func (e *LnkError) Error() string {
@@ -47,4 +67,19 @@ func NetworkError(msg string, cause error) *LnkError { return WrapError(ExitNetw
 // RateLimitError returns an ExitRateLimit-coded error.
 func RateLimitError() *LnkError {
 	return NewError(ExitRateLimit, "rate limited by LinkedIn (HTTP 429)")
+}
+
+func WithRequestDetails(err error, method, operation string, status int, reason DiagnosticReason) error {
+	result := LnkError{Code: ExitGeneral, Message: "LinkedIn request failed"}
+	var coded *LnkError
+	if errors.As(err, &coded) {
+		result = *coded
+	}
+	result.Method = method
+	result.Operation = operation
+	result.Status = status
+	if reason != ReasonUnspecified {
+		result.Reason = reason
+	}
+	return &result
 }

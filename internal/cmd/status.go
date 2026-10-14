@@ -63,12 +63,14 @@ func runStatus(cmd *cobra.Command) error {
 				apiStatus = "connected"
 				apiPop = pop
 			} else {
-				apiStatus = "error: " + pingErr.Error()
+				return pingErr
 			}
 
-			// Best-effort: fetch own name.
 			if apiStatus == "connected" {
 				meRaw, meErr := client.Get("/voyager/api/me", nil)
+				if meErr != nil {
+					return meErr
+				}
 				if meErr == nil {
 					firstName := jstr(jget(meRaw, "miniProfile", "firstName"))
 					lastName := jstr(jget(meRaw, "miniProfile", "lastName"))
@@ -78,7 +80,7 @@ func runStatus(cmd *cobra.Command) error {
 				}
 			}
 		} else {
-			apiStatus = "error: " + clientErr.Error()
+			return clientErr
 		}
 	}
 

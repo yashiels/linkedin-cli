@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -129,6 +130,9 @@ func fetchProfile(client *api.Client, vanityName, profileURN string, miniProfile
 	//    skills, certifications, and honors in a single request.
 	//    The old /voyager/api/identity/profiles/<vanityName> is deprecated (410).
 	dashRaw, dashErr := client.GetProfileByIdentity(vanityName)
+	if isRequestFailure(dashErr) {
+		return nil, dashErr
+	}
 	if dashErr == nil {
 		p, parseErr := parseDashProfile(dashRaw)
 		if parseErr == nil && (p.FirstName != "" || p.LastName != "") {
@@ -148,20 +152,26 @@ func fetchProfile(client *api.Client, vanityName, profileURN string, miniProfile
 	}
 
 	basicRaw, err := client.Get("/voyager/api/identity/profiles/"+url.PathEscape(vanityName), nil)
+	if isRequestFailure(err) && !isDeprecatedProfileEndpoint(err) {
+		return nil, err
+	}
 	if err == nil {
 		parseBasicProfile(p, basicRaw)
 	} else {
 		// REST endpoint is deprecated (410 Gone) — fall back to GraphQL.
 		graphRaw, gerr := fetchProfileGraphQL(client, vanityName, profileURN)
+		if isRequestFailure(gerr) {
+			return nil, gerr
+		}
 		if gerr == nil {
 			parseBasicProfile(p, graphRaw)
 		}
 		// If all fetches failed, report the dash error (most informative).
 		if p.FirstName == "" && p.LastName == "" && miniProfileRaw == nil {
 			if dashErr != nil {
-				return nil, fmt.Errorf("fetching profile for %q: %w", vanityName, dashErr)
+				return nil, fmt.Errorf("fetching profile: %w", dashErr)
 			}
-			return nil, fmt.Errorf("fetching profile for %q: %w", vanityName, err)
+			return nil, fmt.Errorf("fetching profile: %w", err)
 		}
 	}
 
@@ -170,6 +180,9 @@ func fetchProfile(client *api.Client, vanityName, profileURN string, miniProfile
 		"/voyager/api/identity/profiles/"+url.PathEscape(vanityName)+"/profileView",
 		nil,
 	)
+	if isRequestFailure(viewErr) {
+		return nil, viewErr
+	}
 	if viewErr == nil {
 		parseProfileView(p, viewRaw)
 	}
@@ -179,6 +192,9 @@ func fetchProfile(client *api.Client, vanityName, profileURN string, miniProfile
 		"/voyager/api/identity/profiles/"+url.PathEscape(vanityName)+"/networkinfo",
 		nil,
 	)
+	if isRequestFailure(netErr) {
+		return nil, netErr
+	}
 	if netErr == nil {
 		parseNetworkInfo(p, netRaw)
 	}
@@ -322,6 +338,9 @@ func fetchProfileGraphQL(client *api.Client, vanityName, profileURN string) (jso
 			"voyagerIdentityDashProfiles.f3eabbfa5c523c4af4d29c7de3a4a33e",
 			vars,
 		)
+		if isRequestFailure(err) {
+			return nil, err
+		}
 		if err == nil {
 			if result := extractProfileFromGraphQL(raw); result != nil {
 				return result, nil
@@ -643,4 +662,14 @@ func firstNonEmpty(candidates ...string) string {
 		}
 	}
 	return ""
+}
+
+func isRequestFailure(err error) bool {
+	var coded *types.LnkError
+	return errors.As(err, &coded)
+}
+
+func isDeprecatedProfileEndpoint(err error) bool {
+	var coded *types.LnkError
+	return errors.As(err, &coded) && coded.Code == types.ExitGeneral && coded.Reason == types.ReasonHTTPStatus && coded.Status == 410
 }
