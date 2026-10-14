@@ -3,10 +3,15 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/yashiels/linkedin-cli/internal/config"
+	"github.com/yashiels/linkedin-cli/internal/safety"
+	"github.com/yashiels/linkedin-cli/internal/types"
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/yashiels/linkedin-cli/internal/auth"
@@ -17,8 +22,6 @@ const (
 	baseURL          = "https://www.linkedin.com"
 	graphQLPath      = "/voyager/api/graphql"
 	defaultTimeout   = 30 * time.Second
-	maxRetries       = 4
-	baseBackoff      = time.Second
 	legacyAppVersion = "4.1.1209"
 	legacyAppBuild   = "211700"
 	userAgent        = "com.linkedin.android/" + legacyAppBuild + " (Linux; U; Android 16; en_ZA; " +
@@ -38,12 +41,16 @@ type trackingHeader struct {
 }
 
 type Client struct {
-	http    *http.Client
-	creds   auth.Credentials
-	verbose bool
-	debug   bool
-	errOut  io.Writer
-	timeout *time.Duration
+	policy      *safety.Policy
+	policyMutex sync.Mutex
+	policyReady bool
+	policyErr   error
+	http        *http.Client
+	creds       auth.Credentials
+	verbose     bool
+	debug       bool
+	errOut      io.Writer
+	timeout     *time.Duration
 }
 
 type Option func(*Client)
@@ -80,7 +87,7 @@ func New(creds auth.Credentials, opts ...Option) *Client {
 func (c *Client) QueryGraphQL(queryName, queryID string, variables interface{}) (json.RawMessage, error) {
 	varStr, err := restli.Encode(variables)
 	if err != nil {
-		return nil, fmt.Errorf("api: cannot encode variables: %w", err)
+		return nil, errors.New("api: cannot encode query variables")
 	}
 	query := "queryId=" + url.QueryEscape(queryID) + "&queryName=" + url.QueryEscape(queryName) + "&variables=" + varStr
 	return c.readJSON(context.Background(), graphQLReadOperation, baseURL+graphQLPath+"?"+query)
@@ -110,4 +117,20 @@ func (c *Client) injectHeaders(req *http.Request) {
 
 func (c *Client) logf(format string, args ...interface{}) {
 	fmt.Fprintf(c.errOut, "[lnk] "+format+"\n", args...)
+}
+
+func (c *Client) requestPolicy() (*safety.Policy, error) {
+	c.policyMutex.Lock()
+	defer c.policyMutex.Unlock()
+	if c.policyReady || c.policy != nil {
+		return c.policy, c.policyErr
+	}
+	c.policyReady = true
+	cfg, err := config.Load()
+	if err != nil {
+		c.policyErr = types.NewError(2, "safety configuration could not be loaded")
+		return nil, c.policyErr
+	}
+	c.policy, c.policyErr = safety.Default(safety.Config{Delay: time.Duration(cfg.Safety.DelaySeconds) * time.Second, Budget: cfg.Safety.Budget})
+	return c.policy, c.policyErr
 }

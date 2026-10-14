@@ -3,8 +3,10 @@ package config
 
 import (
 	"fmt"
+	"github.com/yashiels/linkedin-cli/internal/safety"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -17,6 +19,7 @@ const (
 
 // Config is the top-level configuration structure.
 type Config struct {
+	Safety   SafetyConfig   `toml:"safety"`
 	Defaults DefaultsConfig `toml:"defaults"`
 	Display  DisplayConfig  `toml:"display"`
 }
@@ -33,9 +36,14 @@ type DisplayConfig struct {
 	Color bool `toml:"color"`
 }
 
-// defaults returns a Config populated with built-in defaults.
+type SafetyConfig struct {
+	DelaySeconds int `toml:"delay_seconds"`
+	Budget       int `toml:"budget"`
+}
+
 func defaults() Config {
 	return Config{
+		Safety: SafetyConfig{DelaySeconds: 5, Budget: 100},
 		Defaults: DefaultsConfig{
 			Sort:  "relevant",
 			Limit: 25,
@@ -61,13 +69,22 @@ func Load() (Config, error) {
 		return cfg, nil
 	}
 	if err != nil {
-		return cfg, fmt.Errorf("config: cannot read %s: %w", path, err)
+		return cfg, fmt.Errorf("config: cannot read configuration")
 	}
 
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
-		return cfg, fmt.Errorf("config: cannot parse %s: %w", path, err)
+	metadata, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return cfg, fmt.Errorf("config: cannot parse configuration")
 	}
 
+	for _, key := range metadata.Undecoded() {
+		if len(key) > 0 && key[0] == "safety" {
+			return cfg, fmt.Errorf("config: unknown safety setting")
+		}
+	}
+	if cfg.Safety.DelaySeconds < 5 || cfg.Safety.DelaySeconds > int(safety.MaxDelay/time.Second) || cfg.Safety.Budget < 1 || cfg.Safety.Budget > 100 {
+		return cfg, fmt.Errorf("config: safety requires representable delay_seconds >= 5 and budget in [1,100]")
+	}
 	return cfg, nil
 }
 

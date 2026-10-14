@@ -4,12 +4,17 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	lnkcmd "github.com/yashiels/linkedin-cli/internal/cmd"
+	"github.com/yashiels/linkedin-cli/internal/config"
+	"github.com/yashiels/linkedin-cli/internal/types"
 )
 
 // version is set at build time via -ldflags.
@@ -18,8 +23,7 @@ var version = "dev"
 func main() {
 	root := newRootCmd()
 	if err := root.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		os.Exit(writeError(root, os.Stderr, err))
 	}
 }
 
@@ -50,18 +54,30 @@ Common flags:
   --plain            Output as plain tab-separated text (pipe-friendly)
   --no-color         Disable ANSI colour
   --quiet / -q       Suppress informational output
-  --verbose          Show HTTP request details on stderr
-  --debug            Show full request/response bodies on stderr`,
+  --verbose          Show bounded HTTP method/status diagnostics on stderr
+  --debug            Show bounded HTTP method/status diagnostics on stderr`,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if flagConfig != "" {
+				if err := os.Setenv("LNK_CONFIG", flagConfig); err != nil {
+					return types.NewError(2, "cannot select configuration")
+				}
+			}
+			if _, err := config.Load(); err != nil {
+				return types.NewError(2, "configuration could not be loaded")
+			}
+			return nil
+		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 
+	root.SetFlagErrorFunc(func(*cobra.Command, error) error { return types.NewError(2, "invalid command flags") })
 	pf := root.PersistentFlags()
 	pf.BoolVar(&flagJSON, "json", false, "Output as JSON")
 	pf.BoolVar(&flagPlain, "plain", false, "Output as plain tab-separated text")
 	pf.BoolVarP(&flagQuiet, "quiet", "q", false, "Suppress informational output")
-	pf.BoolVar(&flagVerbose, "verbose", false, "Show HTTP request details on stderr")
-	pf.BoolVar(&flagDebug, "debug", false, "Show full request/response bodies on stderr")
+	pf.BoolVar(&flagVerbose, "verbose", false, "Show bounded HTTP method/status diagnostics on stderr")
+	pf.BoolVar(&flagDebug, "debug", false, "Show bounded HTTP method/status diagnostics on stderr")
 	pf.BoolVar(&flagNoColor, "no-color", false, "Disable ANSI colour output")
 	pf.BoolVar(&flagNoInput, "no-input", false, "Disable interactive prompts (fail instead)")
 	pf.StringVar(&flagConfig, "config", "", "Path to config file (default ~/.config/lnk/config.toml)")
@@ -76,6 +92,7 @@ Common flags:
 	root.AddCommand(lnkcmd.NewProfileCmd())
 	root.AddCommand(lnkcmd.NewAlertsCmd())
 	root.AddCommand(lnkcmd.NewStatusCmd())
+	root.AddCommand(lnkcmd.NewSafetyCmd())
 
 	// Shell completion.
 	root.AddCommand(&cobra.Command{
@@ -120,4 +137,77 @@ Fish:
 	_ = flagConfig
 
 	return root
+}
+
+func writeError(root *cobra.Command, w io.Writer, err error) int {
+	code := types.ExitGeneral
+	var coded *types.LnkError
+	reason := types.ReasonUnspecified
+	if errors.As(err, &coded) {
+		if coded.Code >= types.ExitGeneral && coded.Code <= types.ExitRateLimit {
+			code = coded.Code
+		}
+		reason = coded.Reason
+	}
+	message, reasonName := safeDiagnosticReason(code, reason)
+	fields := map[string]any{"error": message, "code": code, "reason": reasonName}
+	if coded != nil {
+		if coded.Status >= 100 && coded.Status <= 999 {
+			fields["status"] = coded.Status
+		}
+		switch coded.Method {
+		case "GET", "POST", "DELETE":
+			fields["method"] = coded.Method
+		}
+		switch coded.Operation {
+		case "read", "graphql", "normalized_read", "post", "delete":
+			fields["operation"] = coded.Operation
+		}
+	}
+	jsonMode, _ := root.PersistentFlags().GetBool("json")
+	if jsonMode {
+		_ = json.NewEncoder(w).Encode(fields)
+	} else {
+		fmt.Fprintf(w, "error: %s", message)
+		for _, key := range []string{"reason", "method", "operation", "status"} {
+			if value, ok := fields[key]; ok {
+				fmt.Fprintf(w, " %s=%v", key, value)
+			}
+		}
+		fmt.Fprintln(w)
+	}
+	return code
+}
+
+func safeDiagnosticReason(code int, reason types.DiagnosticReason) (string, string) {
+	switch reason {
+	case types.ReasonHTTPStatus:
+		return "LinkedIn returned an unsuccessful HTTP status", "http_status"
+	case types.ReasonRedirect:
+		return "LinkedIn redirect rejected", "redirect"
+	case types.ReasonTransport:
+		return "LinkedIn request failed", "transport"
+	case types.ReasonResponseRead:
+		return "reading LinkedIn response failed", "response_read"
+	case types.ReasonResponseSize:
+		return "LinkedIn response exceeds size limit", "response_size"
+	case types.ReasonJSON:
+		return "LinkedIn returned invalid JSON", "invalid_json"
+	case types.ReasonGraphQL:
+		return "LinkedIn returned GraphQL errors", "graphql_errors"
+	case types.ReasonRefusal:
+		return "LinkedIn refused request; inspect safety status", "refusal"
+	}
+	switch code {
+	case types.ExitUsage:
+		return "invalid arguments or configuration", "usage"
+	case types.ExitAuth:
+		return "authentication or refusal stop; inspect safety status", "auth_stop"
+	case types.ExitNetwork:
+		return "network or safety state failure; inspect safety status", "network_state"
+	case types.ExitRateLimit:
+		return "request budget, cooldown or rate limit reached; inspect safety status", "rate_limit"
+	default:
+		return "command failed", "general"
+	}
 }
