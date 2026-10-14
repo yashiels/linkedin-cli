@@ -152,7 +152,7 @@ func fetchProfile(client *api.Client, vanityName, profileURN string, miniProfile
 	}
 
 	basicRaw, err := client.Get("/voyager/api/identity/profiles/"+url.PathEscape(vanityName), nil)
-	if isRequestFailure(err) {
+	if isRequestFailure(err) && !isDeprecatedProfileEndpoint(err) {
 		return nil, err
 	}
 	if err == nil {
@@ -666,5 +666,10 @@ func firstNonEmpty(candidates ...string) string {
 
 func isRequestFailure(err error) bool {
 	var coded *types.LnkError
-	return errors.As(err, &coded) && !(coded.Code == types.ExitGeneral && coded.Reason == types.ReasonHTTPStatus)
+	return errors.As(err, &coded)
+}
+
+func isDeprecatedProfileEndpoint(err error) bool {
+	var coded *types.LnkError
+	return errors.As(err, &coded) && coded.Code == types.ExitGeneral && coded.Reason == types.ReasonHTTPStatus && coded.Status == 410
 }

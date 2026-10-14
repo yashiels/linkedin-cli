@@ -92,9 +92,6 @@ func decodeRedirectPath(p string) (string, bool) {
 			decoded = decoded[:len(decoded)-2]
 		}
 	}
-	if bytes.IndexByte(decoded, '%') >= 0 {
-		return "", false
-	}
 	return string(decoded), true
 }
 
