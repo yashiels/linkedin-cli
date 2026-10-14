@@ -6,6 +6,13 @@ Search jobs, view profiles, apply — all from your shell. Built on LinkedIn's V
 
 ![lnk demo](docs/assets/hero.png)
 
+This uses a private, unofficial API. Automated access can violate LinkedIn's rules
+and lead to account restrictions or closure. Request controls reduce accidental
+load; they do not authorize automation or provide a safe threshold or ban immunity.
+Read [request controls and compatibility](docs/request-compatibility.md) before use.
+Applications, saved-job/alert writes, credential changes and logout require explicit
+owner consent for the exact action. Discovery is not consent to apply.
+
 ## Install
 
 **Homebrew (recommended):**
@@ -155,7 +162,12 @@ lnk apply <job-id> [flags]
 | `--dry-run` | Show what would be submitted without actually applying |
 | `--confirm` | Skip the confirmation prompt and apply immediately |
 
-**Examples:**
+Dry-run is explicit, not the default, and still makes quota-counted live reads.
+The default prompts before submission. `--no-input` or a missing TTY without
+`--confirm` fails instead of prompting. Agents must preview with `--dry-run` first;
+never add `--confirm` automatically or submit without exact owner authorization.
+
+**Examples (submission only with exact owner consent):**
 
 ```bash
 lnk apply 4414623196 --dry-run    # preview the submission
@@ -274,7 +286,9 @@ lnk alerts delete 111222333
 
 ### status
 
-Show authentication state, configuration, and API connectivity.
+Show authentication state, configuration, and API connectivity. With credentials,
+this sends a quota-counted live Ping, then a separate `/me` read on success.
+Use `lnk auth status` for local auth state or `lnk safety status` for local policy state.
 
 ```
 lnk status [flags]
@@ -320,8 +334,8 @@ These flags work with every command:
 | `--plain` | | Output as tab-separated text (pipe-friendly) |
 | `--no-color` | | Disable ANSI colour codes |
 | `--quiet` | `-q` | Suppress informational messages |
-| `--verbose` | | Log HTTP requests to stderr |
-| `--debug` | | Log full HTTP request/response bodies to stderr |
+| `--verbose` | | Bounded HTTP method/status diagnostics on stderr |
+| `--debug` | | Bounded HTTP method/status diagnostics on stderr; no bodies or URLs |
 | `--no-input` | | Fail instead of prompting for input |
 | `--config` | | Path to config file (overrides default) |
 
@@ -330,6 +344,10 @@ These flags work with every command:
 **Config file:** `~/.config/lnk/config.toml`
 
 ```toml
+[safety]
+delay_seconds = 5
+budget = 100
+
 [defaults]
 location = "Cape Town, South Africa"
 sort     = "relevant"   # or "recent"
@@ -347,25 +365,64 @@ color = true
 |---|---|
 | `LNK_LI_AT` | LinkedIn `li_at` session cookie (overrides stored credentials) |
 | `LNK_CONFIG` | Path to config file |
-| `LNK_DEBUG` | Set to `1` to enable debug HTTP logging |
+| `LNK_CSRF_TOKEN` | CSRF token after `ajax:` in JSESSIONID (overrides stored credentials) |
 | `NO_COLOR` | Disable ANSI colour output ([no-color.org](https://no-color.org)) |
 
-Setting `LNK_LI_AT` lets you use `lnk` in CI/CD pipelines without writing
-credentials to disk.
+Both session values are required. Nonempty cookie environment values override
+individual fields loaded from the credentials JSON; an unreadable or invalid file
+still fails loading. `--config` overrides `LNK_CONFIG`, which overrides the default
+config path; omitted TOML keys use built-ins. `LNK_DEBUG` is not supported.
+
+Safety settings only permit stricter limits: integer `delay_seconds >= 5` (up to
+9223371916 seconds) and integer `budget` from 1 to 100. Unknown safety keys fail
+with exit 2. Larger delays remain enforced even after the 24-hour admission history
+expires. Config paths and cookie changes do not select a new safety namespace.
 
 ## How It Works
 
-Reverse-engineered from the LinkedIn Android APK v4.1.1209 using standard
-decompilation tools. Requests go to `https://www.linkedin.com/voyager/api/graphql`
-and REST sub-paths under `/voyager/api/` using the same HTTP headers the official
-Android client sends. 481 API queries extracted. Variable encoding uses the RestLi
-protocol (`internal/restli`). Auth via session cookies (`li_at` + `JSESSIONID`).
+The API reference was extracted from Android APK v4.1.1209. Requests use RestLi
+encoding and session cookies against GraphQL and REST paths under `/voyager/api/`.
+The client retains legacy Android-looking 4.1.1209/build 211700 compatibility
+headers, but runs Go `net/http` using browser-session cookies. It does not establish
+a native Android login. The duplicate tracking `osVersion` key is fixed; that is
+header consistency, not proof of current APK identity. A session labeled “Other”
+has an opaque UI classification, not a detection verdict.
 
-Because this relies on LinkedIn's internal API:
+Working query IDs remain in use. Missing literals in a newer APK audit indicate
+possible drift, not server removal or integration of its full catalogue. See
+[compatibility limits](docs/request-compatibility.md#session-and-api-compatibility).
 
-- **It may break** if LinkedIn updates or deprecates endpoints.
-- **Rate-limiting is possible** — the client backs off on HTTP 429 responses.
-- **LinkedIn's Terms of Service** may prohibit automated access.
+## Request controls and recovery
+
+All LinkedIn senders share one host-user-wide in-flight request, at least five
+seconds between admissions, and at most 100 admissions per rolling 24 hours by
+default. Admissions include reads, writes and connectivity checks; one command can
+consume several. These are operational defaults, not LinkedIn-approved thresholds.
+Other hosts, apps and older binaries are outside this accounting.
+
+There are no application-layer retries on refusal, transport or body errors.
+The first HTTP 429 persists a cooldown of at least 30 minutes or the server's longer
+`Retry-After`. HTTP 401/403/999 and known login/challenge redirects persist a manual
+stop. A resource 403, expired session, temporary restriction and permanent ban are
+different possibilities; the stop does not diagnose which occurred.
+
+```bash
+lnk safety status --json
+```
+
+This is local and does not read credentials or contact LinkedIn. It creates policy
+metadata on first use. After the owner reviews the official app/browser and
+explicitly authorizes clearing a manual stop:
+
+```bash
+lnk safety resume --confirm --json
+```
+
+Resume changes no credentials, cannot shorten cooldown or reset admission history,
+and cannot clear an overflow guard or repair corrupt state. Do not delete policy
+state to recover budget. State lives at `~/.local/share/lnk/safety`, independent of
+`--config` and `LNK_CONFIG`. Read the [state, JSON and recovery contract](docs/request-compatibility.md)
+for filesystem requirements, exit codes and remaining limits.
 
 ## Disclaimer
 

@@ -21,7 +21,7 @@ LinkedIn CLI built on the reverse-engineered Voyager API (Android APK). Go 1.26+
 │   │   ├── profile.go       # Profile endpoint
 │   │   └── saved.go         # Saved jobs management
 │   ├── auth/
-│   │   └── store.go         # Cookie persistence (li_at + JSESSIONID) via TOML
+│   │   └── store.go         # Cookie persistence (li_at + CSRF) via JSON
 │   ├── cmd/                 # Cobra sub-command implementations
 │   │   ├── auth.go          # lnk auth login/logout/status
 │   │   ├── search.go        # lnk search
@@ -88,7 +88,7 @@ make clean
 ## Key Design Decisions
 
 - **RestLi encoding** — LinkedIn's Voyager API uses a custom RestLi variable syntax. `internal/restli/encoder.go` handles this encoding. Do not replace it with plain query-string encoding; the API will reject requests.
-- **Cookie auth** — Authentication uses `li_at` and `JSESSIONID` session cookies, not OAuth. Cookies are stored in a TOML file via `internal/auth/store.go`. Do not introduce OAuth flows.
+- **Cookie auth** — Authentication uses `li_at` and `JSESSIONID` session cookies, not OAuth. Cookies are stored in `~/.config/lnk/credentials.json` via `internal/auth/store.go`. Do not introduce OAuth flows.
 - **HTML stripping** — Job descriptions from the API contain raw HTML. `internal/html/html.go` strips tags before display. Keep this layer; removing it exposes raw markup to the terminal.
 - **Cobra + table/JSON output** — All sub-commands use Cobra. Every command that returns data must support `--json` for machine-readable output. The `internal/output` package handles both table and JSON rendering consistently.
 

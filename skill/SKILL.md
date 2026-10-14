@@ -1,6 +1,6 @@
 ---
 name: linkedin
-description: LinkedIn from the terminal via the lnk CLI. Search and view jobs, apply via Easy Apply, view profiles, manage saved jobs and job alerts.
+description: Use lnk for LinkedIn jobs, profiles and account actions.
 ---
 
 # linkedin
@@ -12,8 +12,9 @@ job feed, and manage saved jobs and job-alert subscriptions — all from the
 shell. Every data command supports `--json` for machine-readable output.
 
 > Unofficial tool, not affiliated with LinkedIn. It talks to LinkedIn's private
-> API, so it may break if endpoints change, can be rate-limited (backs off on
-> HTTP 429), and automated access may violate LinkedIn's Terms of Service.
+> API, so endpoints can break and automated access can violate LinkedIn's rules
+> and lead to restrictions or account closure. Request pacing is load control,
+> not authorization, a safe threshold, human mimicry or ban immunity.
 
 ## Install
 
@@ -44,24 +45,95 @@ must obtain the cookies out of band from a real logged-in session.
 | Command | Description |
 |---|---|
 | `lnk auth login` | Interactively prompt for `li_at`, `JSESSIONID` (`ajax:<token>`), and optional `bcookie`; save them |
-| `lnk auth status` | Show current authentication state |
+| `lnk auth status` | Show local authentication state; no network |
 | `lnk auth logout` | Remove stored credentials |
-| `lnk status` | Show auth state, config path, and live API connectivity |
+| `lnk status` | With credentials, quota-counted live Ping then `/me`; may consume two admissions |
 
 **Where credentials live:** `~/.config/lnk/credentials.json`, written atomically
 with `0600` permissions (directory `0700`). JSON fields: `li_at`, `csrf_token`,
 `bcookie`.
 
 **Environment-variable overrides** (take precedence over the file — useful for
-CI or headless use without writing cookies to disk):
+explicitly authorized headless use without writing cookies to disk):
 
 | Variable | Description |
 |---|---|
 | `LNK_LI_AT` | `li_at` session cookie |
 | `LNK_CSRF_TOKEN` | CSRF token (the value after `ajax:` from `JSESSIONID`) |
 | `LNK_CONFIG` | Path to config file |
-| `LNK_DEBUG` | `1` to enable debug HTTP logging |
 | `NO_COLOR` | Disable ANSI colour |
+
+Nonempty cookie overrides apply per field after file loading; invalid/unreadable
+stored JSON still fails. Config precedence is `--config`, then `LNK_CONFIG`, then
+`~/.config/lnk/config.toml`; missing keys use defaults. `LNK_DEBUG` is unsupported.
+Never print cookies or extract them from a browser/keychain automatically. Login
+and credential replacement require owner consent and out-of-band cookie entry.
+
+## Request controls and recovery
+
+Default policy: minimum five seconds between admissions, maximum 100 admissions
+per rolling 24 hours, one host-user-wide in-flight LinkedIn request. Reads, writes,
+Ping and compatibility fallbacks all consume admissions; commands may use several.
+Deduplicate and bound reads; do not set up unlimited polling. Other machines, apps
+and older binaries are not counted. Admissions do not measure exact wire packets:
+Go transport internal retries or trusted custom transports are a limitation.
+
+Only stricter TOML settings are supported:
+
+```toml
+[safety]
+delay_seconds = 5
+budget = 100
+```
+
+Delay must be an integer from 5 through 9223371916 seconds; budget an integer from
+1 through 100. Unknown safety keys are invalid (exit 2). Delays beyond 24 hours
+still use the retained last admission after rolling history expires.
+
+No application-layer retry follows refusal, transport or body failure. First 429
+persists max(30 minutes, server `Retry-After`); 401/403/999 and recognized same-origin
+login/authwall/challenge redirects latch manual review. A resource 403 does not
+prove session expiry or permanent ban. Unknown body errors fail the command without
+guessing an auth latch. Profile compatibility fallbacks are separate paced
+admissions; typed request failures stop them, except 410 at the deprecated REST
+profile caller.
+
+`lnk safety status --json` is local, reads no credentials, and initializes metadata
+on first use. JSON stdout fields are `admissions`, `budget`, `delay_seconds`,
+`cooldown` (UTC timestamp, zero `0001-01-01T00:00:00Z`), and `block` (empty,
+`auth`, or `retry_after_overflow`). It can return success while blocked; inspect
+the fields. Both `lnk --json safety status` and the trailing flag work.
+
+Only after official app/browser review and the owner's explicit instruction, run
+`lnk safety resume --confirm --json`. It clears the manual auth stop locally,
+without network or credential changes. It preserves cooldown and unexpired history,
+cannot clear the overflow guard or repair unsafe/corrupt state. Never automatically
+resume, delete policy state, reset budget, refresh credentials or solve challenges.
+
+State is fixed at `~/.local/share/lnk/safety`, independent of config path and cookies.
+It records timestamps and enumerated stop metadata, not credentials or profile data.
+Locked operations prune admissions at least 24 hours old, retaining last admission,
+greatest observed clock and refusal metadata. Clock rollback and unsafe state fail
+closed. Owner-only modes (directory 0700, files 0600), no extended ACLs/symlinks,
+supported local filesystem and locking/sync semantics are required. Restrictive
+umasks that remove required owner bits can fail closed; never weaken validation.
+
+Success is exit 0; general/body/API errors 1; usage/config/missing resume confirmation
+2; auth/refusal stop 3; transport/state/clock failure 4; budget/cooldown/overflow/lock
+timeout 5. Root `--json` errors go to stderr with `error`, `code`, `reason` and
+optional allowlisted `method`, `operation`, numeric `status`. Successful data goes
+to stdout. Verbose/debug diagnostics contain bounded method/status only, no full
+URLs, credentials or bodies. Explicit data JSON still contains requested data.
+
+Legacy Android-looking 4.1.1209/build 211700 headers are compatibility metadata;
+Go transport and browser cookies do not prove native Android identity. The tracking
+duplicate is fixed, not the full current APK catalogue integrated. “Other” is an
+opaque session label, not a detection verdict. Keep working query IDs: absent newer
+APK literals are drift evidence, not removal proof. Never spoof attestation, device
+IDs or TLS, rotate proxies, or create logins to change the label.
+
+For filesystem details, Retry-After overflow and diagnostics, read the repository's
+[request compatibility reference](../docs/request-compatibility.md).
 
 ## Search & jobs
 
@@ -137,7 +209,9 @@ submitted (your profile data), asks for confirmation, then submits. A known-clos
 job is rejected. If Easy Apply is unavailable, an observed employer URL is labeled
 unverified, or the command states that no employer URL was observed. It never
 labels the generated LinkedIn listing URL as an employer URL. `--dry-run` previews
-without submitting; `--confirm` skips the prompt.
+without submitting, but still makes quota-counted live reads; it is not the default.
+`--confirm` skips the prompt. `--no-input` or missing TTY without `--confirm`
+fails instead of prompting. Never supply `--confirm` automatically.
 
 ## Saved jobs
 
@@ -165,15 +239,16 @@ without submitting; `--confirm` skips the prompt.
 ## Global flags
 
 Work on every command: `--json` (machine-readable), `--plain` (tab-separated,
-pipe-friendly), `--no-color`, `--quiet`/`-q`, `--verbose` (log HTTP requests to
-stderr), `--debug` (full request/response bodies), `--no-input` (fail instead of
+pipe-friendly), `--no-color`, `--quiet`/`-q`, `--verbose` and `--debug` (bounded HTTP method/status diagnostics on
+stderr, without URLs or bodies), `--no-input` (fail instead of
 prompting), `--config <path>`.
 
 ## Headless / agent usage
 
-**Read commands are safe to run unattended once credentials exist:** `search`,
+**Owner-authorized bounded reads can run without prompts once credentials exist:** `search`,
 `job` (without `--open`, including `--check-apply`), `feed`, `profile`, `saved list`, `alerts list`,
-`status`, `auth status`. Add `--json` (or `--plain`) to parse output. Avoid
+`status`, `auth status`, `safety status`. This does not grant account access or
+permission for unlimited polling and does not remove account risk. Add `--json` (or `--plain`) to parse output. Avoid
 `job --open`, which launches a browser.
 
 **Auth headless:** `lnk` needs the `li_at` + CSRF cookies from an existing
@@ -193,8 +268,7 @@ the cookie values come from the user's browser, out of band. Pass `--no-input`
 to any command to make it fail loudly instead of blocking on a prompt when
 credentials are missing.
 
-**Write / action commands — treat as confirm-gated, run only when the user
-explicitly asks:**
+**Write / action commands require exact owner consent; not all have CLI prompts:**
 
 - `lnk apply <job-id>` — submits a real job application. It prompts for
   confirmation by default; **preview first with `--dry-run`.** `--confirm`
@@ -202,6 +276,7 @@ explicitly asks:**
 - `lnk saved add` / `lnk saved remove` — modify the user's saved-jobs list.
 - `lnk alerts create` / `lnk alerts delete` — modify job-alert subscriptions.
 - `lnk auth logout` — deletes stored credentials.
+- `lnk safety resume --confirm` — clears a manual policy stop after owner review.
 
 Never run an application, saved-job, or alert write without explicit consent for
 that exact action. Discovery is not consent.
